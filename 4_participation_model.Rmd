@@ -1,0 +1,788 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-06-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load required libraries
+
+```{r}
+
+library(dplyr)
+library(here)
+library(sf)
+library(raster)
+library(conflicted)
+library(rlang)
+library(scico)
+library(ggpubr)
+library(assertthat)
+library(ggplot2)
+library(stringr)
+library(fixest)
+library(rlang)
+library(exactextractr)
+
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+options(max.print = 10000)
+```
+
+
+
+## create data frame
+### for each year (e.g. 2023, need to do the following)
+### 1. Take the tpu file, collapse on coverage level. get one row per county-year
+### 2. calculate additional stats for each county-year: ROI.
+### 3. Do the same for previous year. Join columns from previous year for # policies, acreage, liability, ROI
+### 4. Also need stats on drought presence/absence from previous year, and missed payout %
+### 5. Calculate year-over-year % growth for dependent variables: policies, acreage, liability $
+### 6. rbind all years
+### 7. perform some checks to make sure data frame is well formed (look at unique values of different columns...)
+### filter to remove first year (or few years)
+### 8. perform regressions 
+
+```{r}
+
+load("/Users/mjcecil/Documents/GitHub/usdm-prf/data/tpu_all_years.rda")
+load("data/grids_usdm_stats.rda")
+
+tx_counties <- st_read(here("data/Tx_CntyBndry_Jurisdictional_TIGER/Tx_CntyBndry_Jurisdictional_TIGER.shp"))
+tx_counties <- st_set_crs(tx_counties, 4326)  # Example: EPSG 4326 (WGS84)
+  
+```
+
+## collapse to unique county-year-intervals
+
+```{r}
+
+
+
+# Define column groups
+group_cols <- c("Commodity.Year", "County.Code", "Practice.Code")
+sum_cols   <- c("Net.Reporting.Level.Amount", "Liability.Amount", "Total.Premium.Amount", "Subsidy.Amount", "Indemnity.Amount", "Liability_cpc_index", "Premium_cpc_index", "Indemnity_cpc_index" )
+drop_cols  <- c("Coverage.Level.Percent", "Practice.Name", "Loss.Ratio")  # <-- columns to drop
+
+# Compute remaining columns to take first of
+all_cols <- colnames(tpu_all_years)
+first_cols <- setdiff(all_cols, c(group_cols, sum_cols, drop_cols))
+
+# Collapse the dataframe
+
+
+tpu_year_county_interval <- tpu_all_years %>%
+  select(-all_of(drop_cols)) %>%
+  group_by(across(all_of(group_cols))) %>%
+  summarise(
+    across(all_of(sum_cols), \(x) sum(x, na.rm = TRUE)),
+    across(all_of(first_cols), ~ first(.)),
+    .groups = "drop"
+  )
+
+```
+
+## collapse to unique county-years, count % of time county is in DM ≥ 3 or DM = 4
+
+```{r}
+
+
+# Define grouping and summary column sets
+group_cols <- c("Commodity.Year", "County.Code")
+sum_cols   <- c("Net.Reporting.Level.Amount", "Liability.Amount", "Total.Premium.Amount", "Subsidy.Amount", "Indemnity.Amount", "Liability_cpc_index", "Premium_cpc_index", "Indemnity_cpc_index" )
+max_cols   <- c("DM_max_county")
+
+# Compute remaining columns to take first of
+all_cols <- colnames(tpu_year_county_interval)
+first_cols <- setdiff(all_cols, c(group_cols, sum_cols, max_cols))
+
+
+tpu_year_county <- tpu_year_county_interval %>%
+  group_by(across(all_of(group_cols))) %>%
+  summarise(
+    # Sum columns
+    across(all_of(sum_cols), \(x) sum(x, na.rm = TRUE)),
+    
+    # Custom DM count logic
+    DM_3_pct = mean(DM_max_county >= 3, na.rm = TRUE) * 100,
+    DM_4_pct = mean(DM_max_county >= 4, na.rm = TRUE) * 100,
+    
+    # Max columns
+    across(all_of(max_cols), \(x) max(x, na.rm = TRUE)),
+    
+    # first columns
+    across(all_of(first_cols), ~ first(.)),
+
+    .groups = "drop"
+  )
+
+
+
+```
+
+## alternative calculation of DM percent
+
+```{r}
+
+tx_county_areas <- read.csv(here("data/tx_county-areas/cpc-county-areas.csv"))
+
+tpu_year_county <- tpu_year_county %>%
+  rowwise() %>%
+  mutate(DM_4_mean_grids_intervals = {
+    year <- Commodity.Year
+    county <- County.Code
+
+    # Step 1: Filter tx_county_areas for this county
+    area_rows <- tx_county_areas %>%
+      filter(County.Code == county)
+
+    if (nrow(area_rows) == 0) return(NA_real_)
+
+    # Step 2: Extract unique grid codes
+    grid_codes <- unique(area_rows$CPC.Grid.Code)
+
+    # Step 3: Filter grids to those grid codes
+    county_rows <- grids %>%
+      filter(GRIDCODE %in% grid_codes)
+
+    # Step 4: Select relevant DM_max columns
+    pattern <- paste0("^DM_max_", year, "_\\d{3}$")
+    matched_cols <- county_rows %>%
+      select(matches(pattern)) %>%
+      st_drop_geometry()
+
+    if (ncol(matched_cols) == 0) return(NA_real_)
+
+    # Step 5: Proportion of D4 values
+    mean(as.matrix(matched_cols) == 4, na.rm = TRUE)
+  }) %>%
+  ungroup()
+
+
+
+```
+
+
+
+
+## calculate additional columns
+
+```{r}
+
+tpu_year_county$ROI <- tpu_year_county$Indemnity_cpc_index/tpu_year_county$Premium_cpc_index
+
+```
+
+## join missed payout count and percent
+
+```{r}
+
+tx_county_areas <- read.csv(here("data/tx_county-areas/cpc-county-areas.csv"))
+
+load("/Users/mjcecil/Documents/GitHub/usdm-prf/data/grids_missed_payouts_dm4.rda")
+
+tpu_year_county$missed_payout_count <- sapply(1:nrow(tpu_year_county), function(x){
+  current_year <- tpu_year_county$Commodity.Year[x]
+  current_county_id <- tpu_year_county$County.Code[x]
+  county_grid_codes <- tx_county_areas %>% filter(County.Code == current_county_id) %>% pull(CPC.Grid.Code) %>% unique()
+  missed_payout_count <- grids_missed_payouts %>% filter(year == current_year) %>% filter(GRIDCODE %in% county_grid_codes) %>% pull(missed_payout_count) %>% sum()
+})
+
+tpu_year_county$missed_payout_count_per_grid <- sapply(1:nrow(tpu_year_county), function(x){
+  current_year <- tpu_year_county$Commodity.Year[x]
+  current_county_id <- tpu_year_county$County.Code[x]
+  county_grid_codes <- tx_county_areas %>% filter(County.Code == current_county_id) %>% pull(CPC.Grid.Code) %>% unique()
+  n_grids <- length(county_grid_codes)
+  missed_payout_count <- grids_missed_payouts %>% filter(year == current_year) %>% filter(GRIDCODE %in% county_grid_codes) %>% pull(missed_payout_count) %>% sum()
+  missed_payout_rate <- missed_payout_count/n_grids
+})
+
+tpu_year_county$missed_payout_pct <- sapply(1:nrow(tpu_year_county), function(x){
+  current_year <- tpu_year_county$Commodity.Year[x]
+  current_county_id <- tpu_year_county$County.Code[x]
+  county_grid_codes <- tx_county_areas %>% filter(County.Code == current_county_id) %>% pull(CPC.Grid.Code) %>% unique()
+  missed_payout_pct <- grids_missed_payouts %>% filter(year == current_year) %>% filter(GRIDCODE %in% county_grid_codes) %>% pull(missed_payout_pct) %>% mean()
+})
+
+```
+
+
+## calculate and join previous year statistics
+
+```{r}
+
+
+# Define your target columns
+prev_year_cols <- c("Net.Reporting.Level.Amount", "Liability_cpc_index", "Premium_cpc_index", "Indemnity_cpc_index", "ROI", "DM_3_pct", "DM_4_pct", "DM_max_county", "missed_payout_count", "missed_payout_count_per_grid", "missed_payout_pct"  )
+
+# Step 1: Create a lagged version of the data
+tpu_year_county_prev <- tpu_year_county %>%
+  select(Commodity.Year, County.Code, all_of(prev_year_cols)) %>%
+  mutate(Commodity.Year = Commodity.Year + 1)  # shift forward to match with current year
+
+# Rename lagged columns
+tpu_year_county_prev <- tpu_year_county_prev %>%
+  rename_with(~ paste0(., "_prev_year"), all_of(prev_year_cols))
+
+# Step 2: Join original df with lagged version
+tpu_year_county_joined <- tpu_year_county %>%
+  left_join(tpu_year_county_prev, by = c("Commodity.Year", "County.Code"))
+
+# Step 3: Compute YoY columns
+for (col in prev_year_cols) {
+  current_col <- sym(col)
+  prev_col <- sym(paste0(col, "_prev_year"))
+  yoy_col <- paste0(col, "_yoy")
+  
+  tpu_year_county_joined <- tpu_year_county_joined %>%
+    mutate(!!yoy_col := {
+        ratio <- !!current_col / !!prev_col
+        ifelse(is.infinite(ratio), NA, ratio)
+      })
+}
+
+```
+
+
+
+
+
+
+
+
+## run model, drought index
+```{r}
+# Run without fixed effects
+feols(Net.Reporting.Level.Amount_yoy ~ DM_4_pct_prev_year, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount_yoy ~ DM_4_pct_prev_year | County.Code, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount_yoy ~ DM_4_pct_prev_year | Commodity.Year, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount_yoy ~ DM_4_pct_prev_year | County.Code + Commodity.Year, data = tpu_year_county_joined)
+
+```
+
+## run model, ROI
+```{r}
+
+# tpu_year_county_joined$Net.Reporting.Level.Amount_yoy <- 100 * tpu_year_county_joined$Net.Reporting.Level.Amount_yoy
+
+# Run without fixed effects
+# feols(Net.Reporting.Level.Amount_yoy ~ ROI_prev_year, data = tpu_year_county_joined)
+# 
+# feols(Net.Reporting.Level.Amount_yoy ~ ROI_prev_year | County.Code, data = tpu_year_county_joined)
+# 
+# feols(Net.Reporting.Level.Amount_yoy ~ ROI_prev_year | Commodity.Year, data = tpu_year_county_joined)
+# 
+# feols(Net.Reporting.Level.Amount_yoy ~ ROI_prev_year | County.Code + Commodity.Year, data = tpu_year_county_joined)
+# 
+# feols(Net.Reporting.Level.Amount_yoy ~ missed_payout_pct_prev_year, data = tpu_year_county_joined)
+# 
+# feols(Net.Reporting.Level.Amount_yoy ~ missed_payout_pct_prev_year | County.Code, data = tpu_year_county_joined)
+# 
+# feols(Net.Reporting.Level.Amount_yoy ~ missed_payout_pct_prev_year | Commodity.Year, data = tpu_year_county_joined)
+# 
+# feols(Net.Reporting.Level.Amount_yoy ~ missed_payout_pct_prev_year | County.Code + Commodity.Year, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount_yoy ~ DM_4_pct_prev_year, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount_yoy ~ DM_4_pct_prev_year | County.Code, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount_yoy ~ DM_4_pct_prev_year | Commodity.Year, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount_yoy ~ DM_4_pct_prev_year | County.Code + Commodity.Year, data = tpu_year_county_joined)
+
+
+# feols(log(Net.Reporting.Level.Amount_yoy) ~ DM_4_pct_prev_year, data = tpu_year_county_joined)
+# 
+# feols(log(Net.Reporting.Level.Amount_yoy) ~ DM_4_pct_prev_year | County.Code, data = tpu_year_county_joined)
+# 
+# feols(log(Net.Reporting.Level.Amount_yoy) ~ DM_4_pct_prev_year | Commodity.Year, data = tpu_year_county_joined)
+# 
+# feols(log(Net.Reporting.Level.Amount_yoy) ~ DM_4_pct_prev_year | County.Code + Commodity.Year, data = tpu_year_county_joined)
+
+```
+
+```{r}
+# Run without fixed effects
+feols(Net.Reporting.Level.Amount ~ ROI_prev_year, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount ~ ROI_prev_year | County.Code, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount ~ ROI_prev_year | Commodity.Year, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount ~ ROI_prev_year | County.Code + Commodity.Year, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount ~ missed_payout_pct_prev_year, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount ~ missed_payout_pct_prev_year | County.Code, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount ~ missed_payout_pct_prev_year | Commodity.Year, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount ~ missed_payout_pct_prev_year | County.Code + Commodity.Year, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount ~ DM_4_pct_prev_year, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount ~ DM_4_pct_prev_year | County.Code, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount ~ DM_4_pct_prev_year | Commodity.Year, data = tpu_year_county_joined)
+
+feols(Net.Reporting.Level.Amount ~ DM_4_pct_prev_year | County.Code + Commodity.Year, data = tpu_year_county_joined)
+
+```
+
+```{r}
+# Run without fixed effects
+feols(log(Net.Reporting.Level.Amount) ~ ROI_prev_year, data = tpu_year_county_joined)
+
+feols(log(Net.Reporting.Level.Amount) ~ ROI_prev_year | County.Code, data = tpu_year_county_joined)
+
+feols(log(Net.Reporting.Level.Amount) ~ ROI_prev_year | Commodity.Year, data = tpu_year_county_joined)
+
+feols(log(Net.Reporting.Level.Amount) ~ ROI_prev_year | County.Code + Commodity.Year, data = tpu_year_county_joined)
+
+feols(log(Net.Reporting.Level.Amount) ~ missed_payout_pct_prev_year, data = tpu_year_county_joined)
+
+feols(log(Net.Reporting.Level.Amount) ~ missed_payout_pct_prev_year | County.Code, data = tpu_year_county_joined)
+
+feols(log(Net.Reporting.Level.Amount) ~ missed_payout_pct_prev_year | Commodity.Year, data = tpu_year_county_joined)
+
+feols(log(Net.Reporting.Level.Amount) ~ missed_payout_pct_prev_year | County.Code + Commodity.Year, data = tpu_year_county_joined)
+
+feols(log(Net.Reporting.Level.Amount) ~ DM_4_pct_prev_year, data = tpu_year_county_joined)
+
+feols(log(Net.Reporting.Level.Amount) ~ DM_4_pct_prev_year | County.Code, data = tpu_year_county_joined)
+
+feols(log(Net.Reporting.Level.Amount) ~ DM_4_pct_prev_year | Commodity.Year, data = tpu_year_county_joined)
+
+feols(log(Net.Reporting.Level.Amount) ~ DM_4_pct_prev_year | County.Code + Commodity.Year, data = tpu_year_county_joined)
+```
+
+## non-regression comparisons
+## what is typical year over year growth in acreage?
+## split to with a drought vs without (DM3, DM4), what is typical growth
+## split to E vs W Texas, with and without drought
+## split by interval
+
+
+
+```{r}
+
+mean_yoy <- mean(tpu_year_county_joined$Net.Reporting.Level.Amount_yoy, na.rm = T)
+median_yoy <- median(tpu_year_county_joined$Net.Reporting.Level.Amount_yoy, na.rm = T)
+
+mean_drought_4_yoy <- tpu_year_county_joined %>%
+  filter(DM_max_county_prev_year == 4) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  mean(., na.rm = T)
+
+median_drought_4_yoy <- tpu_year_county_joined %>%
+  filter(DM_max_county_prev_year == 4) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  median(., na.rm = T)
+
+mean_non_drought_4_yoy <- tpu_year_county_joined %>%
+  filter(DM_max_county_prev_year < 4) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  mean(., na.rm = T)
+
+median_non_drought_4_yoy <- tpu_year_county_joined %>%
+  filter(DM_max_county_prev_year < 4) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  median(., na.rm = T)
+
+mean_drought_3_yoy <- tpu_year_county_joined %>%
+  filter(DM_max_county_prev_year >= 3) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  mean(., na.rm = T)
+
+median_drought_3_yoy <- tpu_year_county_joined %>%
+  filter(DM_max_county_prev_year >= 3) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  median(., na.rm = T)
+
+mean_non_drought_3_yoy <- tpu_year_county_joined %>%
+  filter(DM_max_county_prev_year < 3) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  mean(., na.rm = T)
+
+median_non_drought_3_yoy <- tpu_year_county_joined %>%
+  filter(DM_max_county_prev_year < 3) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  median(., na.rm = T)
+
+median_cols <- c("Net.Reporting.Level.Amount_yoy")
+
+a <- tpu_year_county_joined %>% 
+  select(County.Code, Net.Reporting.Level.Amount_yoy) %>%
+  group_by(County.Code) %>% 
+  summarise(across(all_of(median_cols), \(x) median(x, na.rm = TRUE)))
+
+b <- tpu_year_county_joined %>% 
+  select(Commodity.Year, Net.Reporting.Level.Amount_yoy) %>%
+  group_by(Commodity.Year) %>% 
+  summarise(across(all_of(median_cols), \(x) median(x, na.rm = TRUE)))
+
+tx_counties$COUNTYID <- as.numeric(tx_counties$COUNTYID)
+
+tx_counties <- tx_counties %>%
+  left_join(
+    a,
+    by = c( "COUNTYID" = "County.Code")
+  )
+
+# Define bin breaks and labels
+breaks <- c(-Inf, seq(0.7, 1.3, by = 0.1), Inf)
+labels <- c("<0.7", "0.7–0.8", "0.8–0.9", "0.9–1.0", "1.0–1.1", "1.1–1.2", "1.2–1.3", ">1.3")
+
+# Create a binned factor column
+tx_counties <- tx_counties %>%
+  mutate(Net_Reporting_Bin = cut(Net.Reporting.Level.Amount_yoy, breaks = breaks, labels = labels, include.lowest = TRUE))
+
+# Plot the map
+ggplot(tx_counties) +
+  geom_sf(aes(fill = Net_Reporting_Bin), color = "white", size = 0.1) +
+  scale_fill_viridis_d(option = "plasma", na.value = "grey90") +
+  labs(
+    title = "Net Reporting Level (Median YoY)",
+    fill = "YoY Bin"
+  ) +
+  theme_minimal()
+
+# plot time-series
+ggplot(b) + 
+  geom_point(aes(x = Commodity.Year, y = Net.Reporting.Level.Amount_yoy)) +
+  geom_line(aes(x = Commodity.Year, y = Net.Reporting.Level.Amount_yoy)) +
+  theme_bw() +
+  ylab("Acreage YoY") +
+  xlab("year") +
+  ggtitle("Year over Year acreage growth")
+
+
+```
+
+## East vs West
+
+### East vs West Texas classification (counties)
+
+```{r}
+
+tx_counties <- st_read(here("data/Tx_CntyBndry_Jurisdictional_TIGER/Tx_CntyBndry_Jurisdictional_TIGER.shp"))
+tx_counties <- st_set_crs(tx_counties, 4326)  # Example: EPSG 4326 (WGS84)
+  
+koppen_grid <- raster(here("data/koppen-climate-classification/koppen_ics/w001001.adf"))
+
+tx_counties_rpj <- st_transform(tx_counties, crs = crs(koppen_grid))
+
+## get unique classifications in TX
+summary_stats <- exact_extract(koppen_grid, tx_counties_rpj %>% st_union(), function(values, coverage_fraction) {
+    table(values)
+}, progress = TRUE)
+
+## 1 value is for "B" classifications (arid) 
+## 2 value is for "C" classification (temperate)
+reclass_df <- data.frame(c(7, 8, 15, 18, 22, 23),
+                         c(1, 1, 2, 2, 2, 2))
+koppen_grid_rcl <- reclassify(koppen_grid, rcl = as.matrix(reclass_df))
+
+## extract values for TX counties
+summary_stats_rcl <- exact_extract(
+    koppen_grid_rcl,
+    tx_counties_rpj,
+    function(values, coverage_fraction) {
+        tbl <- table(values)
+        as.numeric(names(tbl)[which.max(tbl)])
+    },
+    progress = TRUE
+)
+
+tx_counties_rpj$region <- summary_stats_rcl
+tx_counties$region <- summary_stats_rcl
+
+east_tx_county_codes <- tx_counties %>% filter(region == 2) %>% pull(COUNTYID) %>% as.numeric()
+west_tx_county_codes <- tx_counties %>% filter(region == 1) %>% pull(COUNTYID) %>% as.numeric()
+
+plot(tx_counties_rpj['region'])
+
+```
+
+## join region data
+
+```{r}
+
+tx_counties_rpj$COUNTYID <- as.numeric(tx_counties_rpj$COUNTYID)
+
+tpu_year_county_joined <- tpu_year_county_joined %>%
+  left_join(
+    tx_counties_rpj %>% 
+      select(COUNTYID, region) %>% 
+      st_drop_geometry(),
+    by = c("County.Code" = "COUNTYID")
+  )
+
+
+```
+
+
+
+```{r}
+
+## e v w
+
+mean_yoy_e <- tpu_year_county_joined %>% filter(region == 2) %>% 
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  mean(na.rm = T)
+mean_yoy_w <- tpu_year_county_joined %>% filter(region == 1) %>% 
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  mean(na.rm = T)
+median_yoy_e <- tpu_year_county_joined %>% filter(region == 2) %>% 
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  median(na.rm = T)
+median_yoy_w <- tpu_year_county_joined %>% filter(region == 1) %>% 
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  median(na.rm = T)
+
+mean_drought_4_yoy_e <- tpu_year_county_joined %>%
+  filter(region == 2) %>% 
+  filter(DM_max_county_prev_year == 4) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  mean(., na.rm = T)
+
+median_drought_4_yoy_e <- tpu_year_county_joined %>%
+  filter(region == 2) %>% 
+  filter(DM_max_county_prev_year == 4) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  median(., na.rm = T)
+
+mean_non_drought_4_yoy_e <- tpu_year_county_joined %>%
+  filter(region == 2) %>% 
+  filter(DM_max_county_prev_year < 4) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  mean(., na.rm = T)
+
+median_non_drought_4_yoy_e <- tpu_year_county_joined %>%
+  filter(region == 2) %>% 
+  filter(DM_max_county_prev_year < 4) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  median(., na.rm = T)
+
+mean_drought_4_yoy_w <- tpu_year_county_joined %>%
+  filter(region == 1) %>% 
+  filter(DM_max_county_prev_year == 4) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  mean(., na.rm = T)
+
+median_drought_4_yoy_w <- tpu_year_county_joined %>%
+  filter(region == 1) %>% 
+  filter(DM_max_county_prev_year == 4) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  median(., na.rm = T)
+
+mean_non_drought_4_yoy_w <- tpu_year_county_joined %>%
+  filter(region == 1) %>% 
+  filter(DM_max_county_prev_year < 4) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  mean(., na.rm = T)
+
+median_non_drought_4_yoy_w <- tpu_year_county_joined %>%
+  filter(region == 1) %>% 
+  filter(DM_max_county_prev_year < 4) %>%
+  pull(Net.Reporting.Level.Amount_yoy) %>% 
+  median(., na.rm = T)
+
+
+
+```
+
+
+## look at with, without drought
+```{r}
+
+## with drought
+median_cols <- c("Net.Reporting.Level.Amount_yoy")
+
+a <- tpu_year_county_joined %>% 
+  filter(DM_max_county_prev_year == 4) %>% 
+  select(County.Code, Net.Reporting.Level.Amount_yoy) %>%
+  group_by(County.Code) %>% 
+  summarise(across(all_of(median_cols), \(x) median(x, na.rm = TRUE)))
+
+tx_counties$COUNTYID <- as.numeric(tx_counties$COUNTYID)
+
+tx_counties <- tx_counties %>%
+  left_join(
+    a,
+    by = c( "COUNTYID" = "County.Code")
+  )
+
+# Define bin breaks and labels
+breaks <- c(-Inf, seq(0.7, 1.3, by = 0.1), Inf)
+labels <- c("<0.7", "0.7–0.8", "0.8–0.9", "0.9–1.0", "1.0–1.1", "1.1–1.2", "1.2–1.3", ">1.3")
+
+# Create a binned factor column
+tx_counties <- tx_counties %>%
+  mutate(Net_Reporting_Bin = cut(Net.Reporting.Level.Amount_yoy, breaks = breaks, labels = labels, include.lowest = TRUE))
+
+# Plot the map
+ggplot(tx_counties) +
+  geom_sf(aes(fill = Net_Reporting_Bin), color = "white", size = 0.1) +
+  scale_fill_viridis_d(option = "plasma", na.value = "grey90") +
+  labs(
+    title = "Net Reporting Level (YoY) under Drought Conditions",
+    fill = "YoY Bin"
+  ) +
+  theme_minimal()
+
+
+```
+
+## without drought
+
+```{r}
+
+
+## with drought
+median_cols <- c("Net.Reporting.Level.Amount_yoy")
+
+a <- tpu_year_county_joined %>% 
+  filter(DM_max_county_prev_year < 4) %>% 
+  select(County.Code, Net.Reporting.Level.Amount_yoy) %>%
+  group_by(County.Code) %>% 
+  summarise(across(all_of(median_cols), \(x) median(x, na.rm = TRUE)))
+
+tx_counties$COUNTYID <- as.numeric(tx_counties$COUNTYID)
+
+tx_counties <- tx_counties %>%
+  left_join(
+    a,
+    by = c( "COUNTYID" = "County.Code")
+  )
+
+# Define bin breaks and labels
+breaks <- c(-Inf, seq(0.7, 1.3, by = 0.1), Inf)
+labels <- c("<0.7", "0.7–0.8", "0.8–0.9", "0.9–1.0", "1.0–1.1", "1.1–1.2", "1.2–1.3", ">1.3")
+
+# Create a binned factor column
+tx_counties <- tx_counties %>%
+  mutate(Net_Reporting_Bin = cut(Net.Reporting.Level.Amount_yoy, breaks = breaks, labels = labels, include.lowest = TRUE))
+
+# Plot the map
+ggplot(tx_counties) +
+  geom_sf(aes(fill = Net_Reporting_Bin), color = "white", size = 0.1) +
+  scale_fill_viridis_d(option = "plasma", na.value = "grey90") +
+  labs(
+    title = "Net Reporting Level (YoY) under Drought Conditions",
+    fill = "YoY Bin"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+## bar chart for Yoy growth
+
+```{r}
+
+# Create a named vector
+combo_totals <- c(
+  "All county-years" = median_yoy,
+  "No exceptional drought" = median_non_drought_4_yoy,
+  "Exceptional Drought" = median_drought_4_yoy
+)
+
+
+library(ggplot2)
+
+# Create a data frame, preserving order
+combo_df <- data.frame(
+  group = factor(names(combo_totals), levels = names(combo_totals)),
+  value = as.numeric(combo_totals)
+)
+
+# Create a "height above 1" column
+combo_df$bar_height <- combo_df$value - 1
+
+# Plot with manual baseline at y = 1 using geom_rect
+ggplot(combo_df, aes(x = group)) +
+  geom_rect(aes(
+    xmin = as.numeric(group) - 0.4,
+    xmax = as.numeric(group) + 0.4,
+    ymin = 1,
+    ymax = value
+  ), fill = "steelblue") +
+  geom_text(aes(x = group, y = value + 0.005, label = paste0(round(value * 100), "%")),
+            size = 4.5) +
+  scale_y_continuous(limits = c(1, max(combo_df$value) + 0.05), expand = c(0, 0)) +
+  labs(
+    title = "Median Year-over-Year Acreage Change",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 25, hjust = 1),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+
+```
+
+## plot of dm yearly county pct
+
+```{r}
+
+tx_counties <- st_read(here("data/Tx_CntyBndry_Jurisdictional_TIGER/Tx_CntyBndry_Jurisdictional_TIGER.shp"))
+tx_counties <- st_set_crs(tx_counties, 4326)  # Example: EPSG 4326 (WGS84)
+  
+
+a <- tpu_year_county_joined %>% 
+  filter(year == 2022) %>% 
+  select(County.Code, DM_4_mean_grids_intervals)
+
+tx_counties$COUNTYID <- as.numeric(tx_counties$COUNTYID)
+
+tx_counties <- tx_counties %>%
+  left_join(
+    a,
+    by = c( "COUNTYID" = "County.Code")
+  )
+
+
+
+
+# Step 1: Create bins by 10%, with last bin >50%
+tx_counties <- tx_counties %>%
+  mutate(D4_bin = cut(
+    DM_4_mean_grids_intervals,
+    breaks = c(0, 0.1, 0.2, 0.3, 0.4, 0.5, Inf),
+    labels = c("0–10%", "10–20%", "20–30%", "30–40%", "40–50%", ">50%"),
+    include.lowest = TRUE,
+    right = FALSE
+  ))
+
+# Step 2: Plot with reversed "plasma" palette to make purple the highest
+ggplot(tx_counties) +
+  geom_sf(aes(fill = D4_bin), color = "white", size = 0.1) +
+  scale_fill_viridis_d(
+    option = "plasma",
+    direction = -1,   # Reverse palette to make purple highest
+    na.value = "grey90"
+  ) +
+  labs(
+    title = "2022 Exceptional Drought %",
+    fill = "D4 %"
+  ) +
+  theme_minimal()
+
+```
+
+
+
