@@ -1,0 +1,234 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-06-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load required libraries
+
+```{r}
+
+library(dplyr)
+library(here)
+library(sf)
+library(raster)
+library(conflicted)
+library(rlang)
+library(scico)
+library(ggpubr)
+library(assertthat)
+library(ggplot2)
+library(stringr)
+
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+options(max.print = 10000)
+```
+
+## Joining USDM data
+
+This script focuses on joining USDM data to PRF grids in selected states
+
+## inputs
+
+```{r}
+
+start_year <- 2010
+end_year <- 2025
+
+high_drought_threshold <- 4
+
+interval_start_months <- 1:11
+names(interval_start_months) <- 625:635
+
+interval_end_months <- 2:12
+names(interval_end_months) <- 625:635
+
+```
+
+
+
+
+## load grids data 
+
+```{r}
+
+load(file = here("data/outputs/grids_intersecting.rda"))
+
+years <- start_year:end_year
+suffixes <- 625:635
+
+# Build pattern
+year_pattern <- paste0(years, collapse = "|")
+suffix_pattern <- paste0(suffixes, collapse = "|")
+regex_pattern <- paste0("^cpc_index_(", year_pattern, ")_(", suffix_pattern, ")$")
+
+grids <- grids_intersecting %>% select(GRIDCODE, STATE, lon, lat, matches(regex_pattern))
+
+
+```
+
+
+
+
+
+
+Unzip all USDM .zip files
+
+```{r}
+unzipped <- FALSE
+
+if(unzipped == FALSE){
+    # Set root directory where all the year folders are located
+  root_dir <- here("data/USDM_GIS")
+  
+  # Get all subfolders matching the pattern
+  folders <- list.dirs(root_dir, recursive = FALSE, full.names = TRUE)
+  target_folders <- folders[grepl("_USDM_M", basename(folders))]
+  print(target_folders)
+  # Loop through each folder
+  for (folder in target_folders) {
+    # List all zip files in the folder
+    zip_files <- list.files(folder, pattern = "\\.zip$", full.names = TRUE)
+    
+    # Extract each zip file to the same folder
+    for (zip in zip_files) {
+      unzip(zip, exdir = folder)
+    }
+  }
+}
+
+
+```
+
+
+
+
+Load individual USDM shapefiles, extract values to grids in AOI
+```{r}
+
+sf::sf_use_s2(FALSE)
+
+grids_pt <- grids %>% st_drop_geometry() %>% st_as_sf(., coords = c("lon", "lat"), crs = 4326)
+
+
+
+for (year in years) {
+  print(paste0("processing year ", year))
+  # Get list of all shapefiles for the year
+  year_shps <- list.files(here(paste0("data/USDM_GIS/", year, "_USDM_M")),
+                         pattern = "\\.shp$", full.names = TRUE)
+  
+  for (shp in year_shps) {
+    # Extract date from file name using regex (expects format like USDM_YYYYMMDD.shp)
+    usdm_date <- str_extract(basename(shp), "\\d{8}")
+    print(usdm_date)
+    # Read shapefile
+    a <- st_read(shp, quiet = TRUE)
+    
+    # Prepare grids points (assuming grids is available in environment)
+    grids_pt <- grids %>% 
+      st_drop_geometry() %>% 
+      st_as_sf(coords = c("lon", "lat"), crs = 4326)
+    
+    # Spatial join and keep only DM column renamed with date
+    grids_joined <- st_join(grids_pt, a, left = TRUE) %>%
+      mutate(DM = coalesce(DM, -1)) %>%
+      select(DM) %>%
+      rename(!!paste0("DM_", usdm_date) := DM)
+    
+    grids[[paste0("DM_", usdm_date)]]  <- grids_joined[[paste0("DM_", usdm_date)]]
+  }
+}
+
+save(grids, file = here("data/grids_usdm"))
+
+rm(grids_joined, grids_pt)
+
+```
+
+
+```{r}
+
+library(ggplot2)
+
+ggplot(grids) +
+  geom_sf(aes(col = DM_20250211)) +
+  scale_color_viridis_c() +
+  theme_minimal()
+
+
+```
+
+## calculater per interval stats (mean, median, max, high_drought_pct)
+
+
+```{r}
+years <- start_year:end_year
+intervals <- 625:635
+interval_start_months <- 1:11
+names(interval_start_months) <- 625:635
+
+interval_end_months <- 2:12
+names(interval_end_months) <- 625:635
+
+interval_df <- expand.grid("interval" = intervals, "year" = years)
+
+interval_df$start_month <- interval_start_months[as.character(interval_df$interval)]
+interval_df$end_month <- interval_end_months[as.character(interval_df$interval)]
+
+interval_df$start_date <- paste0(interval_df$year, "-", str_pad(interval_df$start_month, 2, "left", "0"), "-01")
+interval_df$end_date <- paste0(interval_df$year, "-", str_pad(interval_df$end_month, 2, "left", "0"), "-31")
+
+
+
+for(k in 1:nrow(interval_df)){
+  current_year <- interval_df$year[k]
+  current_interval <- interval_df$interval[k]
+  current_start_month <- str_pad(interval_df$start_month[k], 2, "left", "0")
+  current_end_month <- str_pad(interval_df$end_month[k], 2, "left", "0")
+  
+  print(paste0("processing ", current_year, " ", current_interval))
+
+  # Select all columns starting with year + start month or year + end month
+  dm_columns <- c(
+    names(grids)[startsWith(names(grids), paste0("DM_", current_year, current_start_month))],
+    names(grids)[startsWith(names(grids), paste0("DM_", current_year, current_end_month))]
+  ) %>% unique()  # remove duplicates if any
+
+  median_column_name <- paste0("DM_median_", current_year, "_", current_interval)
+  max_column_name <- paste0("DM_max_", current_year, "_", current_interval)
+  mean_column_name <- paste0("DM_mean_", current_year, "_", current_interval)
+  high_drought_pct_column_name <- paste0("DM_high_pct_", current_year, "_", current_interval)
+  
+  
+  grids <- grids %>%
+    rowwise() %>%
+    mutate(
+      dm_values = list(c_across(all_of(dm_columns))),
+      # create columns with dynamic names using :=
+      !!max_column_name := max(dm_values, na.rm = TRUE),
+      !!median_column_name := median(dm_values, na.rm = TRUE),
+      !!mean_column_name := mean(dm_values, na.rm = TRUE),
+      !!high_drought_pct_column_name := sum(dm_values >= high_drought_threshold)/length(dm_values)
+
+    ) %>%
+    ungroup() %>%
+    select(-dm_values)  # remove temp column if not needed
+}
+
+save(grids, file = here("data/outputs/grids_usdm_stats.rda"))
+
+
+```
+
+
+
+
+
+
+

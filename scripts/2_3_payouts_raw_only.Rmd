@@ -1,0 +1,380 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-06-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load required libraries
+
+```{r}
+
+library(dplyr)
+library(here)
+library(sf)
+library(raster)
+library(conflicted)
+library(rlang)
+library(scico)
+library(ggpubr)
+library(assertthat)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+options(max.print = 10000)
+```
+
+
+
+
+## summary stats
+### mean RI by year
+
+```{r}
+load(here("data/outputs/grids_usdm_stats.rda"))
+
+high_drought_threshold <- 4
+
+ri_threshold <- 0.9
+
+start_year <- 2010
+end_year <- 2025
+
+```
+
+## load and merge all tpu files
+
+```{r}
+
+# List of years
+years <- start_year:end_year
+
+# Initialize an empty list to store dataframes
+tpu_list <- list()
+
+# Loop through each year
+for (yr in years) {
+  # Construct file name
+  file_name <- sprintf(here("data/outputs/payouts/tpu_Grazing_%d_no_sim.rda"), yr)
+  
+  # Load file, `tpu` will be created in the environment
+  load(file_name)
+  
+  # Add year column
+  tpu$year <- yr
+
+  # Append to list
+  tpu_list[[as.character(yr)]] <- tpu
+}
+
+# Combine all into one data frame
+tpu_all_years <- do.call(rbind, tpu_list)
+
+# Check the result
+head(tpu_all_years)
+
+save(tpu_all_years, file =  here("data/outputs/tpu_all_years.rda"))
+
+```
+
+
+## collapse tpu_all_years to county-year (combining different intervals, coverage levels etc)
+
+```{r}
+
+
+sum_cols <- c(
+  "Net.Reporting.Level.Amount",
+  "Liability.Amount",
+  "Total.Premium.Amount",
+  "Subsidy.Amount",
+  "Indemnity.Amount",
+  "Endorsed.Commodity.Reporting.Level.Amount"
+  # "Liability_cpc_index",
+  # "Premium_cpc_index",
+  # "Indemnity_cpc_index"
+)
+
+tpu_collapsed <- tpu_all_years %>%
+  
+  # Drop unwanted columns
+  select(-Loss.Ratio) %>%
+  
+  # Group by the collapse keys
+  group_by(year, State.Code, County.Code, State.Abbreviation, State.Name) %>%
+  
+  # Summarise
+  summarise(
+    
+    # Sum the specified columns
+    across(all_of(sum_cols), ~ sum(.x, na.rm = TRUE)),
+    
+    # Take first value of all remaining columns
+    across(
+      -all_of(sum_cols),
+      ~ first(.x)
+    ),
+    
+    .groups = "drop"
+  )
+
+
+
+
+
+```
+
+
+
+## add columns for loss ratio and ROI (based on raw or estimated data)
+
+```{r}
+
+tpu_collapsed$loss_ratio_raw <- tpu_collapsed$Indemnity.Amount/tpu_collapsed$Total.Premium.Amount ## ROI
+
+
+```
+
+
+## add associated variables to tpu_all
+### drought exposure 
+
+### % grid-intervals with DM_max >= high drought
+### mean USDM drought across all grid_intervals
+### median USDM drought across all grid_intervals
+### max USDM drought across all grid_intervals
+
+
+```{r}
+
+## load county areas file to identify grids in each county
+load(file =  here("data/outputs/cpc_county_areas.rda"))
+cpc_county_areas$County.Code <- as.numeric(cpc_county_areas$County.Code)
+
+
+# Create empty vector to store results
+DM_max_values    <- rep(NA_real_, nrow(tpu_collapsed))
+DM_mean_values   <- rep(NA_real_, nrow(tpu_collapsed))
+DM_median_values <- rep(NA_real_, nrow(tpu_collapsed))
+DM_high_pct_values <- rep(NA_real_, nrow(tpu_collapsed))
+
+# Loop over each row of tpu_collapsed
+for (i in seq_len(nrow(tpu_collapsed))) {
+  if(i %% 1000 == 0){
+      print(i)
+  }
+  # Extract identifiers
+  county <- tpu_collapsed$County.Code[i]
+  state <- tpu_collapsed$State.Code[i]
+  year <- tpu_collapsed$year[i]
+
+  # Step 2: Filter cpc_county_areas 
+  area_rows <- cpc_county_areas %>% 
+    filter(State.Code == state) %>% 
+    filter(County.Code == county)
+  
+  # Skip if no matching area rows
+  if (nrow(area_rows) == 0) {
+    print("no rows available")
+    print(state)
+    print(paste0("county, ", county))
+    DM_max_values[i] <- NA
+    DM_mean_values[i] <- NA
+    DM_median_values[i] <- NA
+    DM_high_pct_values[i] <- NA
+    next
+  }
+
+  # Step 2b: Extract unique CPC grid codes
+  grid_codes <- unique(area_rows$CPC.Grid.Code)
+
+  # Step 3: Filter grids
+  county_rows <- grids[grids$GRIDCODE %in% grid_codes, ]
+  
+  pattern_max <- paste0("^DM_max_", year, "_6(2[5-9]|3[0-5])$")
+  pattern_median <- paste0("^DM_median_", year, "_6(2[5-9]|3[0-5])$")
+  pattern_mean <- paste0("^DM_mean_", year, "_6(2[5-9]|3[0-5])$")
+
+  # Step 4: Get values for DM indices
+  DM_max_values[i] <- county_rows %>% st_drop_geometry() %>% 
+    select(matches(pattern_max)) %>%
+    summarise(across(everything(), ~ max(.x, na.rm = TRUE))) %>%
+    unlist() %>%
+    max(na.rm = TRUE)
+  
+  DM_mean_values[i] <- county_rows %>% st_drop_geometry() %>% 
+    select(matches(pattern_mean)) %>%
+    summarise(across(everything(), ~ mean(.x, na.rm = TRUE))) %>%
+    unlist() %>%
+    mean(na.rm = TRUE)
+  
+  DM_median_values[i] <- county_rows %>% st_drop_geometry() %>% 
+    select(matches(pattern_median)) %>%
+    summarise(across(everything(), ~ median(.x, na.rm = TRUE))) %>%
+    unlist() %>%
+    median(na.rm = TRUE)
+  
+  DM_high_pct_values[i] <- county_rows %>% st_drop_geometry() %>% 
+    select(matches(pattern_max)) %>%
+    summarise(across(everything(), ~ mean(.x >= high_drought_threshold , na.rm = TRUE))) %>%
+    unlist() %>%
+    mean(na.rm = TRUE)
+}
+
+# Add columns to tpu_collapsed
+tpu_collapsed$DM_max <- DM_max_values
+tpu_collapsed$DM_mean <- DM_mean_values
+tpu_collapsed$DM_median <- DM_median_values
+tpu_collapsed$DM_high_pct <- DM_high_pct_values
+
+
+save(tpu_collapsed, file = here("data/outputs/tpu_collapsed.rda"))
+
+
+
+
+```
+
+
+### payout variables
+#### cost ratio variables are already calculated
+#### need to calculate % payout frequency
+
+```{r}
+
+
+# Create empty vector to store results
+RI_payout_pct <- numeric(nrow(tpu_collapsed))
+
+# Loop over each row of tpu_collapsed
+for (i in seq_len(nrow(tpu_collapsed))) {
+  if(i %% 1000 == 0){
+      print(i)
+  }
+  # Extract identifiers
+  county <- tpu_collapsed$County.Code[i]
+  state <- tpu_collapsed$State.Code[i]
+  year <- tpu_collapsed$year[i]
+
+  # Step 2: Filter cpc_county_areas 
+  area_rows <- cpc_county_areas %>% 
+    filter(State.Code == state) %>% 
+    filter(County.Code == county)
+  
+  # Skip if no matching area rows
+  if (nrow(area_rows) == 0) {
+    print("no rows available")
+    print(state)
+    print(paste0("county, ", county))
+    RI_payout_pct[i] <- NA
+    next
+  }
+
+  # Step 2b: Extract unique CPC grid codes
+  grid_codes <- unique(area_rows$CPC.Grid.Code)
+
+  # Step 3: Filter grids
+  county_rows <- grids[grids$GRIDCODE %in% grid_codes, ]
+  
+  pattern_RI <- paste0("^cpc_index_", year, "_6(2[5-9]|3[0-5])$")
+
+  
+  # Step 4: Get values for DM indices
+  RI_payout_pct[i] <- county_rows %>% st_drop_geometry() %>% 
+    select(matches(pattern_RI)) %>%
+    summarise(across(everything(), ~ mean(.x <= ri_threshold, na.rm = TRUE))) %>%
+    unlist() %>%
+    mean(na.rm = TRUE)
+  
+}
+
+# Add columns to tpu_collapsed
+tpu_collapsed$RI_payout_pct <- RI_payout_pct
+
+save(tpu_collapsed, file = here("data/outputs/tpu_collapsed.rda"))
+
+
+
+
+```
+
+
+
+
+
+### join relevant SOB columns (Policies Earning Premium Count, Units Earning Premium Count)
+### very slow
+
+```{r}
+
+load(file = here("data/outputs/tpu_collapsed.rda"))
+
+total_policies_sold_vct <- rep(NA_real_, nrow(tpu_collapsed))
+total_policies_earning_vct <- rep(NA_real_, nrow(tpu_collapsed))
+total_units_earning_vct <- rep(NA_real_, nrow(tpu_collapsed))
+
+
+
+# Loop over each row of tpu_collapsed
+for (i in seq_len(nrow(tpu_collapsed))) {
+  if(i %% 100 == 0){
+      print(i)
+  }
+  # Extract identifiers
+  county <- tpu_collapsed$County.Code[i]
+  state <- tpu_collapsed$State.Code[i]
+  year <- tpu_collapsed$year[i]
+  
+  # Get column names
+  data_w_names <- read.csv(here("data/PRF_sob/sobcov_2024_names.csv"))
+  column_names <- colnames(data_w_names)
+  
+  # Read the data file for this year
+  year_2 <- substr(as.character(year), 3, 4)
+  sob_data <- read.csv(here(paste0("data/PRF_sob/raw_files/sobcov", year_2, ".txt")),
+                   sep = '|')
+  names(sob_data) <- column_names
+  
+    # Filter for the specific commodity and insurance plan
+  data_prf <- sob_data %>%
+    filter(Commodity.Code == 88) %>% 
+    filter(Insurance.Plan.Code == 13) %>% 
+    filter(Location.State.Code == state) %>% 
+    filter(Location.County.Code == county) %>% 
+    select(Policies.Sold.Count, Policies.Earning.Premium.Count, Units.Earning.Premium.Count) 
+  
+  n_obs <- nrow(data_prf)
+  if(n_obs == 0){
+     total_policies_sold_vct[i] <- 0
+     total_policies_earning_vct[i] <- 0
+     total_units_earning_vct[i] <- 0
+     next
+  }
+
+  total_policies_sold_vct[i] <- sum(data_prf$Policies.Sold.Count)
+  total_policies_earning_vct[i] <- sum(data_prf$Policies.Earning.Premium.Count)
+  total_units_earning_vct[i] <- sum(data_prf$Units.Earning.Premium.Count)
+
+}
+
+tpu_collapsed$total_policies_sold <- total_policies_sold_vct
+tpu_collapsed$total_policies_earning <- total_policies_earning_vct
+tpu_collapsed$total_units_earning <- total_units_earning_vct
+
+save(tpu_collapsed, file = here("data/outputs/tpu_collapsed.rda"))
+
+```
+
+
+
+
+
+
+
+

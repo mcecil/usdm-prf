@@ -1,0 +1,161 @@
+---
+title: "ARER workflow"
+author: Michael Cecil
+output: html_notebook
+---
+
+This notebook performs the rainfall index and payout calculations for much of the manuscript.
+
+## load required libraries
+
+```{r}
+
+library(dplyr)
+library(here)
+library(sf)
+library(raster)
+library(conflicted)
+library(rlang)
+library(scico)
+library(ggpubr)
+library(assertthat)
+library(ggplot2)
+library(tigris)
+
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+options(max.print = 10000)
+```
+
+## Inputs
+
+```{r}
+
+start_year_payouts <- 2010
+end_year_payouts <- 2025
+
+```
+
+
+## Payouts
+
+First determine payouts for given inputs (year, grid, interval, coverage level, productivity factor, grazing/haying, )
+
+Assumptions made:
+- constant productivity factor of 1
+- rates are constant across years
+- rates are consistent despite changing temporal baseline or spatial resolution
+- acreage proportionally split among cells in county
+- liability, premia, payouts calculated based on acreage for each interval
+
+Equations used:
+Dollar Amount of Insurance Per Acre = County-Base Value * Productivity Factor (also = Liability per Acre?)
+Liability = Dollar Amount * # Acres
+Premium per acre = Liability per acre * rate 
+Payment factor = (trigger_threshold - RI)/trigger_threshold
+Indemnity = Liability * payment factor 
+
+Columns to add
+CHIRPS data set
+- rates, 
+- payment factor for each interval x year
+
+
+## load rates data, join to grids_intersecting
+
+Note - the rates files have a funny format. They are actually downloading two pieces of information. The Premium.Rate is based on the coverage level (70%, 75% ... 90% etc), while the County.Base.Value is based on the use type (Grazing, Haying non irrigated etc).
+
+We will just be focusing on Grazing for now as that is the largest use case. 
+
+```{r}
+
+load(file = paste0(here("data/outputs/grids_intersecting.rda")))
+
+## get state names in usable vector
+states <- unique(grids_intersecting$STATE)
+full_names <- state.name[match(states, state.abb)]
+lower_hyphen_names <- gsub(" ", "-", tolower(full_names)) # Convert to lowercase + hyphenated
+
+
+
+
+```
+
+## create CPC area proportion files
+output table has columns "State.Code"     "County.Code"    "CPC.Grid.Code"  "Area"           "Proportion"    
+
+```{r}
+
+## download counties from tigris
+state_fips <- fips_codes %>%   # built into tigris
+  filter(state %in% states) %>%
+  distinct(state, state_code)
+
+counties_sf <- counties(
+  state = states,
+  cb = TRUE,      # cartographic boundary (simpler, faster)
+  year = 2022
+)
+
+aea_crs <- 5070  # US Albers Equal Area
+
+counties_sf <- st_transform(counties_sf, aea_crs)
+grids_sf    <- st_transform(grids_intersecting, aea_crs)
+
+county_grid_intersections <- st_intersection(
+  counties_sf,
+  grids_sf
+)
+
+county_grid_intersections <- county_grid_intersections %>%
+  mutate(
+    Area = as.numeric(st_area(geometry))
+  )
+
+area_table <- county_grid_intersections %>%
+  group_by(STATEFP, COUNTYFP) %>%
+  mutate(
+    Proportion = Area / sum(Area)
+  ) %>%
+  ungroup()
+
+cpc_county_areas <- area_table %>%
+  mutate(
+    # ---- Your requested schema ----
+    State.Code    = as.numeric(STATEFP),  # numeric state FIPS
+    State         = STUSPS,               # TX, ND, etc.
+    County.Code   = COUNTYFP,             # 3-digit county FIPS
+    CPC.Grid.Code = GRIDCODE
+  ) %>%
+  st_drop_geometry() %>%
+  select(
+    State.Code,
+    State,
+    County.Code,
+    CPC.Grid.Code,
+    Area,
+    Proportion
+  )
+
+cpc_county_areas$County.Code <- as.numeric(cpc_county_areas$County.Code)
+
+
+save(cpc_county_areas, file = here("data/outputs/cpc_county_areas.rda"))
+
+```
+
+## validation check
+
+```{r}
+sums_by_county <- cpc_county_areas %>%
+  group_by(State.Code, County.Code) %>%
+  summarise(sum_prop = sum(Proportion))
+
+```
+
+
+
+
+
+
+

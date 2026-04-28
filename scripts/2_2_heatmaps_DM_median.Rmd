@@ -1,0 +1,481 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-06-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load required libraries
+
+```{r}
+
+library(dplyr) 
+library(here)
+library(sf)
+library(raster)
+library(conflicted)
+library(rlang)
+library(scico)
+library(ggpubr)
+library(assertthat)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(gt)
+library(viridis)
+library(scales)
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+options(max.print = 10000)
+```
+
+
+
+## initial plots
+
+## summary stats
+###mean RI by year
+
+```{r}
+load(here("data/outputs/grids_usdm_stats.rda"))
+
+grids <- grids %>% filter(!is.na(cpc_index_2010_625)) %>% filter(!(is.na(DM_median_2010_625)))
+
+ri_threshold <- 0.9
+high_drought_threshold <- 4
+high_drought_label <-"D4"
+
+start_year <- 2010
+end_year <- 2025
+
+aoi_states <- c("CA", "NV", "AZ", "NM", "CO", "UT", "TX", "OK", "KS")
+
+interval_start_months <- 1:11
+names(interval_start_months) <- 625:635
+
+interval_end_months <- 2:12
+names(interval_end_months) <- 625:635
+
+```
+
+## function for exporting tables
+
+```{r}
+
+export_df_to_latex <- function(df, file_path, caption = NULL) {
+  
+  #-----------------------------
+  # Helper: escape LaTeX specials
+  #-----------------------------
+  escape_latex <- function(x) {
+    x <- gsub("\\\\", "\\\\textbackslash{}", x)
+    x <- gsub("([%&_#\\$])", "\\\\\\1", x)
+    x <- gsub("_", "\\\\_", x)
+    return(x)
+  }
+  
+  # Convert to character
+  df[] <- lapply(df, as.character)
+  
+  # Escape LaTeX characters
+  df[] <- lapply(df, escape_latex)
+  colnames(df) <- escape_latex(colnames(df))
+  
+  # Alignment: first left, rest right
+  n_cols <- ncol(df)
+  align_string <- paste0("l", paste(rep("r", n_cols - 1), collapse = ""))
+  
+  # Build body rows
+  body_rows <- apply(df, 1, function(row) {
+    paste(row, collapse = " & ")
+  })
+  
+  body_rows <- paste0(body_rows, " \\\\")
+  body_text <- paste(body_rows, collapse = "\n")
+  
+  # Header row
+  header <- paste(colnames(df), collapse = " & ")
+  header <- paste0(header, " \\\\")
+  
+  # Caption + label handling
+  file_name <- tools::file_path_sans_ext(basename(file_path))
+  
+  if (is.null(caption)) {
+    caption_text <- gsub("_", " ", file_name)
+  } else {
+    caption_text <- caption
+  }
+  
+  label <- paste0("tab:", file_name)
+  
+  # Build LaTeX table
+  latex_table <- paste0(
+"\\begin{table}[t]
+\\centering
+\\fontsize{12pt}{14pt}\\selectfont
+\\begin{tabular}{@{\\extracolsep{\\fill}}", align_string, "}
+\\toprule
+", header, "
+\\midrule\\addlinespace[2.5pt]
+", body_text, "
+\\bottomrule
+\\end{tabular}
+\\caption{", caption_text, "}
+\\label{", label, "}
+\\end{table}"
+  )
+  
+  # Write file
+  writeLines(latex_table, file_path)
+  
+  message("LaTeX table exported to: ", file_path)
+}
+
+
+
+```
+
+## heatmap DM = 4
+
+```{r}
+
+
+
+# Step 1: Long format
+dm_long <- grids %>% st_drop_geometry() %>% 
+  select(starts_with("DM_median_")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "var",
+    values_to = "dm_value"
+  ) %>%
+  mutate(
+    var = str_remove(var, "DM_median_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  ) %>%
+  filter(!is.na(dm_value)) %>%
+  mutate(high_dm = dm_value >= 4)
+
+# Step 2: Summarize by year × interval
+heatmap_data <- dm_long %>%
+  group_by(year, interval) %>%
+  summarise(
+    pct_high_dm = mean(high_dm) * 100,
+    .groups = "drop"
+  )
+
+# Step 3: Add readable interval labels
+interval_labels <- tibble(
+  interval = 625:635,
+  label = paste0(
+    month.abb[interval_start_months[as.character(625:635)]],
+    "-",
+    month.abb[interval_end_months[as.character(625:635)]]
+  )
+)
+
+heatmap_data <- heatmap_data %>%
+  left_join(interval_labels, by = "interval") %>%
+  mutate(label = factor(label, levels = interval_labels$label))  # Preserve order
+
+
+#-----------------------------
+# Step 4: Plot heatmap with 0% in white
+#-----------------------------
+#-----------------------------
+# Determine max value for color scaling
+#-----------------------------
+max_val <- max(heatmap_data$pct_high_dm, na.rm = TRUE)
+
+# Small epsilon above 0 to allow white for 0
+eps <- 0.0001
+
+#-----------------------------
+# Highlight boxes
+#-----------------------------
+# Map interval numbers to factor positions (1-indexed based on interval_labels order)
+interval_levels <- levels(heatmap_data$label)
+year_levels <- levels(factor(heatmap_data$year))
+
+get_x <- function(interval_num) which(interval_levels == interval_labels$label[interval_labels$interval == interval_num])
+get_y <- function(yr) which(year_levels == as.character(yr))
+
+highlights <- bind_rows(
+  # 2011: intervals 629-635
+  tibble(
+    xmin = get_x(629) - 0.5,
+    xmax = get_x(635) + 0.5,
+    ymin = get_y(2011) - 0.5,
+    ymax = get_y(2011) + 0.5
+  ),
+  # 2020 interval 635 through 2021 interval 631
+  # Split into two rectangles: rest of 2020 and start of 2021
+  tibble(
+    xmin = get_x(635) - 0.5,
+    xmax = get_x(635) + 0.5,
+    ymin = get_y(2020) - 0.5,
+    ymax = get_y(2020) + 0.5
+  ),
+  tibble(
+    xmin = get_x(625) - 0.5,
+    xmax = get_x(633) + 0.5,
+    ymin = get_y(2021) - 0.5,
+    ymax = get_y(2021) + 0.5
+  )
+)
+
+highlight_labels <- tibble(
+  x     = c(mean(c(get_x(625), get_x(633))),  # 2021 box center
+             mean(c(get_x(629), get_x(635)))), # 2011 box center
+  y     = c(get_y(2021) - 1,                # just below 2021 box
+             get_y(2011) - 1),              # just below 2011 box
+  label = c("2020-21 Drought",
+             "2011 Drought")
+)
+
+
+#-----------------------------
+# Plot
+#-----------------------------
+p_heatmap_dm <- ggplot(heatmap_data, aes(x = label, y = factor(year), fill = pct_high_dm)) +
+  geom_tile(color = "lightgrey", linewidth = 0.3) +
+  scale_fill_gradientn(
+    colors = c("white", viridis(100, option = "C", direction = -1)),
+    values = rescale(c(0, eps, seq(eps, max_val, length.out = 100))),
+    limits = c(0, max_val),
+    name = "% DM = 4",
+    na.value = "grey90"
+  ) +
+  # Highlight boxes drawn on top
+# Outer black border
+  geom_rect(
+    data = highlights,
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+    inherit.aes = FALSE,
+    fill = NA,
+    color = "black",
+    linewidth = 3
+  ) +
+  # Inner white border
+  geom_rect(
+    data = highlights,
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+    inherit.aes = FALSE,
+    fill = NA,
+    color = "white",
+    linewidth = 1.5
+  ) +
+  labs(
+    x = "Interval",
+    y = "Year",
+    title = "Heatmap of High Drought Frequency (DM Max = 4)",
+    fill = "% High DM"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  ) +  # Add to plot after geom_rect layers:
+  geom_text(
+    data = highlight_labels,
+    aes(x = x, y = y, label = label),
+    inherit.aes = FALSE,
+    size = 3.5,
+    fontface = "bold",
+    color = "black"
+  )
+p_heatmap_dm
+
+png(here("data/outputs/figures/heatmap_DM.png"),
+    width = 800,
+    height = 600)
+plot(p_heatmap_dm)
+dev.off()
+
+```
+
+## heatmap RI
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(viridis)
+library(here)
+
+#-----------------------------
+# 1. Long format RI
+#-----------------------------
+ri_long <- grids %>%
+  st_drop_geometry() %>%
+  select(starts_with("cpc_index_")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "var",
+    values_to = "RI"
+  ) %>%
+  mutate(
+    var = str_remove(var, "cpc_index_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  ) %>%
+  filter(!is.na(RI)) %>%
+  mutate(payout = RI <= 0.90)  # threshold for payout
+
+#-----------------------------
+# 2. Summarize by year × interval
+#-----------------------------
+heatmap_ri <- ri_long %>%
+  group_by(year, interval) %>%
+  summarise(
+    pct_payout = mean(payout) * 100,
+    .groups = "drop"
+  )
+
+#-----------------------------
+# 3. Add readable interval labels
+#-----------------------------
+interval_labels <- tibble(
+  interval = 625:635,
+  label = paste0(
+    month.abb[interval_start_months[as.character(625:635)]],
+    "-",
+    month.abb[interval_end_months[as.character(625:635)]]
+  )
+)
+
+heatmap_ri <- heatmap_ri %>%
+  left_join(interval_labels, by = "interval") %>%
+  mutate(label = factor(label, levels = interval_labels$label))  # preserve order
+
+#-----------------------------
+# 4. Determine min/max for color scaling
+#-----------------------------
+min_val <- min(heatmap_ri$pct_payout, na.rm = TRUE)
+max_val <- max(heatmap_ri$pct_payout, na.rm = TRUE)
+
+#-----------------------------
+# 5. Plot RI heatmap
+#-----------------------------
+
+highlights <- bind_rows(
+  # 2011: intervals 629-635
+  tibble(
+    xmin = get_x(629) - 0.5,
+    xmax = get_x(635) + 0.5,
+    ymin = get_y(2011) - 0.5,
+    ymax = get_y(2011) + 0.5
+  ),
+  # 2020 interval 635 through 2021 interval 631
+  # Split into two rectangles: rest of 2020 and start of 2021
+  tibble(
+    xmin = get_x(635) - 0.5,
+    xmax = get_x(635) + 0.5,
+    ymin = get_y(2020) - 0.5,
+    ymax = get_y(2020) + 0.5
+  ),
+  tibble(
+    xmin = get_x(625) - 0.5,
+    xmax = get_x(633) + 0.5,
+    ymin = get_y(2021) - 0.5,
+    ymax = get_y(2021) + 0.5
+  )
+)
+
+highlight_labels <- tibble(
+  x     = c(mean(c(get_x(625), get_x(633))),  # 2021 box center
+             mean(c(get_x(629), get_x(635)))), # 2011 box center
+  y     = c(get_y(2021) - 1,                # just below 2021 box
+             get_y(2011) - 1),              # just below 2011 box
+  label = c("2020-21 Drought",
+             "2011 Drought")
+)
+
+
+p_heatmap_ri <- ggplot(heatmap_ri, aes(x = label, y = factor(year), fill = pct_payout)) +
+  geom_tile(color = "lightgrey", linewidth = 0.3) +
+  # Outer black border
+  geom_rect(
+    data = highlights,
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+    inherit.aes = FALSE,
+    fill = NA,
+    color = "black",
+    linewidth = 3
+  ) +
+  # Inner white border
+  geom_rect(
+    data = highlights,
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+    inherit.aes = FALSE,
+    fill = NA,
+    color = "white",
+    linewidth = 1.5
+  ) +  # Add to plot after geom_rect layers:
+  geom_text(
+    data = highlight_labels,
+    aes(x = x, y = y, label = label),
+    inherit.aes = FALSE,
+    size = 3.5,
+    fontface = "bold",
+    color = "white"
+  ) +
+  scale_fill_viridis_c(
+    name = "% Payout (RI ≤ 0.90)",
+    option = "C",
+    direction = -1,
+    limits = c(min_val, max_val)
+  ) +
+  
+  labs(
+    x = "Interval",
+    y = "Year",
+    title = "Heatmap of Payout Frequency (RI ≤ 0.90)",
+    fill = "% Payout"
+  ) +
+  
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+p_heatmap_ri
+#-----------------------------
+# 6. Export PNG
+#-----------------------------
+png(here("data/outputs/figures/heatmap_RI.png"),
+    width = 800,
+    height = 600)
+
+plot(p_heatmap_ri)
+dev.off()
+
+
+
+```
+
+```{r}
+
+library(patchwork)
+
+png(here("data/outputs/figures/heatmaps_both.png"),
+         width = 1000,
+         height = 600)
+plot(p_heatmap_dm + p_heatmap_ri)
+dev.off()
+
+
+
+
+
+
+
+
+```
+
+

@@ -1,0 +1,320 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-06-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load required libraries
+
+```{r}
+
+library(dplyr) 
+library(here)
+library(sf)
+library(raster)
+library(conflicted)
+library(rlang)
+library(scico)
+library(ggpubr)
+library(assertthat)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(gt)
+
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+options(max.print = 10000)
+```
+
+
+
+## initial plots
+
+## summary stats
+###mean RI by year
+
+```{r}
+load(here("data/outputs/grids_usdm_stats.rda"))
+
+grids <- grids %>% filter(!is.na(cpc_index_2010_625)) %>% filter(!(is.na(DM_max_2010_625)))
+
+ri_threshold <- 0.9
+high_drought_threshold <- 4
+high_drought_label <-"D4"
+
+start_year <- 2010
+end_year <- 2025
+
+aoi_states <- c("CA", "NV", "AZ", "NM", "CO", "UT", "TX", "OK", "KS")
+
+interval_start_months <- 1:11
+names(interval_start_months) <- 625:635
+
+interval_end_months <- 2:12
+names(interval_end_months) <- 625:635
+
+```
+
+## function for exporting tables
+
+```{r}
+
+export_df_to_latex <- function(df, file_path, caption = NULL) {
+  
+  #-----------------------------
+  # Helper: escape LaTeX specials
+  #-----------------------------
+  escape_latex <- function(x) {
+    x <- gsub("\\\\", "\\\\textbackslash{}", x)
+    x <- gsub("([%&_#\\$])", "\\\\\\1", x)
+    x <- gsub("_", "\\\\_", x)
+    return(x)
+  }
+  
+  # Convert to character
+  df[] <- lapply(df, as.character)
+  
+  # Escape LaTeX characters
+  df[] <- lapply(df, escape_latex)
+  colnames(df) <- escape_latex(colnames(df))
+  
+  # Alignment: first left, rest right
+  n_cols <- ncol(df)
+  align_string <- paste0("l", paste(rep("r", n_cols - 1), collapse = ""))
+  
+  # Build body rows
+  body_rows <- apply(df, 1, function(row) {
+    paste(row, collapse = " & ")
+  })
+  
+  body_rows <- paste0(body_rows, " \\\\")
+  body_text <- paste(body_rows, collapse = "\n")
+  
+  # Header row
+  header <- paste(colnames(df), collapse = " & ")
+  header <- paste0(header, " \\\\")
+  
+  # Caption + label handling
+  file_name <- tools::file_path_sans_ext(basename(file_path))
+  
+  if (is.null(caption)) {
+    caption_text <- gsub("_", " ", file_name)
+  } else {
+    caption_text <- caption
+  }
+  
+  label <- paste0("tab:", file_name)
+  
+  # Build LaTeX table
+  latex_table <- paste0(
+"\\begin{table}[t]
+\\centering
+\\fontsize{12pt}{14pt}\\selectfont
+\\begin{tabular}{@{\\extracolsep{\\fill}}", align_string, "}
+\\toprule
+", header, "
+\\midrule\\addlinespace[2.5pt]
+", body_text, "
+\\bottomrule
+\\end{tabular}
+\\caption{", caption_text, "}
+\\label{", label, "}
+\\end{table}"
+  )
+  
+  # Write file
+  writeLines(latex_table, file_path)
+  
+  message("LaTeX table exported to: ", file_path)
+}
+
+
+
+```
+
+
+```{r}
+load(file = here("data/outputs/tpu_collapsed.rda"))
+load(file = paste0(here("data/outputs/grids_intersecting.rda")))
+
+usdm <- st_read(here("data/USDM_GIS/2011_USDM_M/USDM_20110607.shp"))
+# usdm <- st_read(here("/Users/mjcecil/Documents/GitHub/usdm-prf/data/USDM_GIS/2000_USDM_M/USDM_20000530.shp"))
+
+```
+
+## make tpu_collapsed spatial
+
+```{r}
+library(sf)
+library(dplyr)
+library(tigris)   # easiest way to get US county shapes
+options(tigris_use_cache = TRUE)
+
+counties_sf <- counties(cb = TRUE, year = 2022) %>%
+  st_as_sf()
+
+tpu_collapsed <- tpu_collapsed %>%
+  mutate(
+    State.Code_str  = sprintf("%02s", State.Code),
+    County.Code_str = sprintf("%03s", County.Code),
+    GEOID = paste0(State.Code_str, County.Code_str)
+  )
+
+tpu_sf <- tpu_collapsed %>%
+  left_join(
+    counties_sf %>% select(GEOID, geometry),
+    by = "GEOID"
+  ) %>%
+  st_as_sf()
+
+plot(tpu_sf["Net.Reporting.Level.Amount"])
+
+save(tpu_sf, file=here("data/outputs/tpu_sf.rda"))
+
+
+```
+
+
+```{r}
+
+plot(usdm["DM"])
+
+
+
+```
+
+```{r}
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(tigris)
+
+options(tigris_use_cache = TRUE)
+
+#---------------------------
+# 1) Texas boundary
+#---------------------------
+tx_sf <- states(cb = TRUE, year = 2022) %>%
+  filter(STUSPS == "TX") %>%
+  st_as_sf()
+
+#---------------------------
+# 3) Pecos County boundary
+#   FIPS: 48-371
+#---------------------------
+pecos_boundary <- tpu_sf %>%
+  filter(State.Code == "48",
+         County.Code == "371") %>%
+  st_union() %>%
+  st_as_sf()
+
+
+#---------------------------
+# 5) Match CRS
+#---------------------------
+tx_sf           <- st_transform(tx_sf, st_crs(usdm))
+pecos_boundary  <- st_transform(pecos_boundary, st_crs(usdm))
+grids_intersecting_rates <- st_transform(grids_intersecting, st_crs(usdm))
+
+
+#---------------------------
+# 2) Clip USDM to Texas
+#---------------------------
+usdm_tx <- st_intersection(usdm, tx_sf)
+
+
+
+#---------------------------
+# 4) CPC grids intersecting Pecos
+#---------------------------
+grids_pecos <- grids_intersecting_rates[
+  st_intersects(grids_intersecting_rates,
+                pecos_boundary,
+                sparse = FALSE),
+]
+
+grids_pecos     <- st_transform(grids_pecos, st_crs(usdm))
+
+#---------------------------
+# 6) USDM color palette
+#---------------------------
+
+usdm_tx <- usdm_tx %>%
+  mutate(
+    DM = factor(DM,
+                levels = c(0, 1, 2, 3, 4),
+                labels = c("D0", "D1", "D2", "D3", "D4"))
+  )
+
+#---------------------------
+# USDM color palette
+#---------------------------
+usdm_cols <- c(
+  "D0" = "#FFFF00",
+  "D1" = "#FCD37F",
+  "D2" = "#FFAA00",
+  "D3" = "#E60000",
+  "D4" = "#730000"
+)
+
+#---------------------------
+# 7) Plot
+#---------------------------
+p_map_3_datasets <- ggplot() +
+
+  # USDM polygons (clipped to TX)
+  geom_sf(data = usdm_tx,
+          aes(fill = DM),
+          color = NA) +
+
+  # CPC grid boundaries (blue)
+  geom_sf(data = grids_pecos,
+          fill = NA,
+          color = "blue",
+          linewidth = 0.4) +
+
+  # Pecos County boundary
+  geom_sf(data = pecos_boundary,
+          fill = NA,
+          color = "black",
+          linewidth = 1.2) +
+
+  # Texas boundary
+  geom_sf(data = tx_sf,
+          fill = NA,
+          color = "black",
+          linewidth = 0.8) +
+
+  scale_fill_manual(values = usdm_cols,
+                    na.value = "white") +
+
+  coord_sf() +
+  theme_minimal() +
+  labs(
+    title = "USDM Classification June 7 2011",
+    subtitle = "Pecos County, Texas",
+    fill = "USDM"
+  )
+
+p_map_3_datasets
+
+png(here("data/outputs/figures/p_map_3_datasets.png"),
+    width = 800,
+    height = 800)
+plot(p_map_3_datasets)
+dev.off()
+
+
+```
+
+
+
+
+
+
+

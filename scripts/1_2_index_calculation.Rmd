@@ -1,0 +1,107 @@
+---
+title: "ARER workflow - index calculation"
+author: Michael Cecil
+output: html_notebook
+---
+
+This notebook performs the rainfall index and payout calculations for much of the manuscript.
+It uses different spatiotemporal assumptions on the CPC and CHIRPS datasets.
+
+
+## load required libraries
+
+```{r}
+
+library(dplyr)
+library(here)
+library(sf)
+library(raster)
+library(conflicted)
+library(rlang)
+library(scico)
+library(ggpubr)
+library(assertthat)
+library(ggplot2)
+library(tigris)   # or use rnaturalearth
+options(tigris_use_cache = TRUE)
+
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+options(max.print = 10000)
+```
+
+## inputs
+
+```{r}
+
+aoi_states <- c("CA", "NV", "AZ", "NM", "CO", "UT", "TX", "OK", "KS")
+
+
+```
+
+
+## Load pre-calculated monthly averages for CPC data, merge with RMA grid shapefile
+
+```{r}
+
+monthly_averages <- read.csv(here("data/outputs/monthly_averages_na_rm.csv"))
+
+## adjust longitude in above to be negative in western hemisphere
+monthly_averages$lon <- monthly_averages$lon - 360
+
+## Load CPC grids as spatial object, merge monthly average columns to spatial object
+grids <- st_read(here("data/rainfall_index_grids/official_RMA_RI_grid.shp"))
+grids$lon <- rowMeans(cbind(grids$X_MIN, grids$X_MAX))
+grids$lat <- rowMeans(cbind(grids$Y_MIN, grids$Y_MAX))
+
+monthly_averages_merge <- merge(grids, monthly_averages,
+                          by = c("lon", "lat"))
+
+
+
+```
+
+## Filter to CPC grids in states of interest
+
+```{r}
+
+us_states <- states(cb = TRUE, year = 2022)  # generalized boundaries
+
+sel_states <- us_states %>%
+  filter(STUSPS %in% aoi_states)
+
+sel_states <- st_transform(sel_states, st_crs(monthly_averages_merge))
+
+idx <- st_intersects(monthly_averages_merge, sel_states)
+
+grids_intersecting <- st_join(
+  monthly_averages_merge,
+  sel_states,
+  join = st_intersects,
+  left = FALSE   # keeps only intersecting grids
+) %>% rename(STATE = STUSPS)
+
+
+
+```
+
+
+## save grids_intersecting
+```{r}
+save(grids_intersecting, 
+     file = here("data/outputs/grids_intersecting.rda"))
+
+```
+
+
+
+## plot
+
+```{r}
+plot(st_geometry(monthly_averages_merge), border = "grey")
+plot(st_geometry(sel_states), add = TRUE, col = NA, border = "red", lwd = 2)
+plot(st_geometry(grids_intersecting), add = TRUE, col = "blue", alpha = 0.5)
+
+```
+
+

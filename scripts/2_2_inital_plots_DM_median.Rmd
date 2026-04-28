@@ -1,0 +1,3067 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-06-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load required libraries
+
+```{r}
+
+library(dplyr)
+library(here)
+library(sf)
+library(raster)
+library(conflicted)
+library(rlang)
+library(scico)
+library(ggpubr)
+library(assertthat)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(gt)
+library(viridis)
+library(scales)
+
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+options(max.print = 10000)
+```
+
+
+
+## initial plots
+
+## summary stats
+###mean RI by year
+
+```{r}
+load(here("data/outputs/grids_usdm_stats.rda"))
+
+grids <- grids %>% filter(!is.na(cpc_index_2010_625)) %>% filter(!(is.na(DM_median_2010_625)))
+
+ri_threshold <- 0.9
+high_drought_threshold <- 4
+high_drought_label <-"D4"
+
+start_year <- 2010
+end_year <- 2025
+
+aoi_states <- c("CA", "NV", "AZ", "NM", "CO", "UT", "TX", "OK", "KS")
+
+interval_start_months <- 1:11
+names(interval_start_months) <- 625:635
+
+interval_end_months <- 2:12
+names(interval_end_months) <- 625:635
+
+```
+
+## function for exporting tables
+
+```{r}
+
+export_df_to_latex <- function(df, file_path, caption = NULL) {
+  
+  #-----------------------------
+  # Helper: escape LaTeX specials
+  #-----------------------------
+  escape_latex <- function(x) {
+    x <- gsub("\\\\", "\\\\textbackslash{}", x)
+    x <- gsub("([%&_#\\$])", "\\\\\\1", x)
+    x <- gsub("_", "\\\\_", x)
+    return(x)
+  }
+  
+  # Convert to character
+  df[] <- lapply(df, as.character)
+  
+  # Escape LaTeX characters
+  df[] <- lapply(df, escape_latex)
+  colnames(df) <- escape_latex(colnames(df))
+  
+  # Alignment: first left, rest right
+  n_cols <- ncol(df)
+  align_string <- paste0("l", paste(rep("r", n_cols - 1), collapse = ""))
+  
+  # Build body rows
+  body_rows <- apply(df, 1, function(row) {
+    paste(row, collapse = " & ")
+  })
+  
+  body_rows <- paste0(body_rows, " \\\\")
+  body_text <- paste(body_rows, collapse = "\n")
+  
+  # Header row
+  header <- paste(colnames(df), collapse = " & ")
+  header <- paste0(header, " \\\\")
+  
+  # Caption + label handling
+  file_name <- tools::file_path_sans_ext(basename(file_path))
+  
+  if (is.null(caption)) {
+    caption_text <- gsub("_", " ", file_name)
+  } else {
+    caption_text <- caption
+  }
+  
+  label <- paste0("tab:", file_name)
+  
+  # Build LaTeX table
+  latex_table <- paste0(
+"\\begin{table}[t]
+\\centering
+\\fontsize{12pt}{14pt}\\selectfont
+\\begin{tabular}{@{\\extracolsep{\\fill}}", align_string, "}
+\\toprule
+", header, "
+\\midrule\\addlinespace[2.5pt]
+", body_text, "
+\\bottomrule
+\\end{tabular}
+\\caption{", caption_text, "}
+\\label{", label, "}
+\\end{table}"
+  )
+  
+  # Write file
+  writeLines(latex_table, file_path)
+  
+  message("LaTeX table exported to: ", file_path)
+}
+
+
+
+```
+
+
+
+## Summary stats for RI (across all grid-intervals)
+
+```{r}
+years <- start_year:end_year
+intervals <- 625:635
+
+RI_cols <- expand.grid(years, intervals) |>
+  apply(1, \(x) paste0("cpc_index_", x[1], "_", x[2]))
+
+DM_cols <- expand.grid(years, intervals) |>
+  apply(1, \(x) paste0("DM_median_", x[1], "_", x[2]))
+
+
+
+
+#-----------------------------
+# 1. Long format
+#-----------------------------
+df_long <- grids %>%
+  select(STATE, any_of(RI_cols)) %>%
+  st_drop_geometry() %>% 
+  pivot_longer(
+    cols = -STATE,
+    names_to = "grid_interval",
+    values_to = "RI"
+  )
+
+#-----------------------------
+# 2. Classify payout status
+#-----------------------------
+df_long <- df_long %>%
+  mutate(
+    payout_class = case_when(
+      RI <= 0.90 ~ "Payout",
+      RI >  0.90 ~ "No Payout",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(payout_class))
+
+#-----------------------------
+# 3. State-level percentages
+#-----------------------------
+state_table <- df_long %>%
+  group_by(STATE, payout_class) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(STATE) %>%
+  mutate(percent = n / sum(n)) %>%
+  ungroup() %>%
+  select(-n) %>%
+  pivot_wider(
+    names_from = payout_class,
+    values_from = percent
+  )
+
+#-----------------------------
+# 4. Total row
+#-----------------------------
+total_row <- df_long %>%
+  group_by(payout_class) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(percent = n / sum(n)) %>%
+  select(-n) %>%
+  pivot_wider(
+    names_from = payout_class,
+    values_from = percent
+  ) %>%
+  mutate(STATE = "TOTAL") %>%
+  select(STATE, everything())
+
+#-----------------------------
+# 5. Combine + round + reorder
+#-----------------------------
+final_table <- bind_rows(state_table, total_row) %>%
+  mutate(
+    Payout     = paste0(round(Payout * 100), "%"),
+    `No Payout` = paste0(round(`No Payout` * 100), "%")
+  ) %>%
+  select(STATE, Payout, `No Payout`) %>%
+  arrange(STATE == "TOTAL", STATE)   # puts TOTAL last
+
+final_table
+
+export_df_to_latex(
+  df = final_table,
+  file_path = here("data/outputs/tables/state_RI_payout_table.tex"),
+  caption = "RI payout frequencies by state, 2010-2025"
+)
+
+
+
+```
+
+
+
+
+
+
+## DM table
+
+```{r}
+
+#-----------------------------
+# 0. Build DM column list
+#-----------------------------
+years <- start_year:end_year
+intervals <- 625:635
+
+DM_cols <- expand.grid(years, intervals) |>
+  apply(1, \(x) paste0("DM_median_", x[1], "_", x[2]))
+
+#-----------------------------
+# 1. Long format
+#-----------------------------
+df_long <- grids %>%
+  select(STATE, any_of(DM_cols)) %>%
+  st_drop_geometry() %>%
+  pivot_longer(
+    cols = -STATE,
+    names_to = "grid_interval",
+    values_to = "DM"
+  )
+
+#-----------------------------
+# 2. Classify D4 status
+#-----------------------------
+df_long <- df_long %>%
+  mutate(
+    dm_class = case_when(
+      DM >= 4 ~ "D4",
+      DM <  4 ~ "Non-D4",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(dm_class))
+
+#-----------------------------
+# 3. State-level percentages
+#-----------------------------
+state_table <- df_long %>%
+  group_by(STATE, dm_class) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(STATE) %>%
+  mutate(percent = n / sum(n)) %>%
+  ungroup() %>%
+  select(-n) %>%
+  pivot_wider(
+    names_from = dm_class,
+    values_from = percent
+  )
+
+#-----------------------------
+# 4. Total row
+#-----------------------------
+total_row <- df_long %>%
+  group_by(dm_class) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(percent = n / sum(n)) %>%
+  select(-n) %>%
+  pivot_wider(
+    names_from = dm_class,
+    values_from = percent
+  ) %>%
+  mutate(STATE = "TOTAL") %>%
+  select(STATE, everything())
+
+#-----------------------------
+# 5. Combine + round + reorder
+#-----------------------------
+final_table <- bind_rows(state_table, total_row) %>%
+  mutate(
+    D4      = paste0(round(D4 * 100), "%"),
+    `Non-D4` = paste0(round(`Non-D4` * 100), "%")
+  ) %>%
+  select(STATE, D4, `Non-D4`) %>%
+  arrange(STATE == "TOTAL", STATE)   # TOTAL last
+
+final_table
+
+
+export_df_to_latex(
+  df = final_table,
+  file_path = here("data/outputs/tables/state_DM_payout_table.tex"),
+  caption = "Exceptional drought (D4) frequencies by state, 2010-2025"
+)
+
+
+
+
+```
+
+
+
+
+
+## RI-DM Combos table
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+
+# Thresholds
+high_drought_threshold <- 4   # DM threshold for D4
+ri_threshold <- 0.90          # RI threshold for payout
+
+# Years & intervals
+years <- 2010:2025
+intervals <- 625:635
+
+# Generate column names
+DM_cols <- expand.grid(years, intervals) |>
+  apply(1, \(x) paste0("DM_median_", x[1], "_", x[2]))
+RI_cols <- expand.grid(years, intervals) |>
+  apply(1, \(x) paste0("cpc_index_", x[1], "_", x[2]))
+
+#-----------------------------
+# 1. Pivot grids long for DM & RI
+#-----------------------------
+grids_long <- grids %>%
+  st_drop_geometry() %>%
+  select(STATE, all_of(DM_cols), all_of(RI_cols)) %>%
+  pivot_longer(
+    cols = -STATE,
+    names_to = "colname",
+    values_to = "value"
+  ) %>%
+  # Identify DM vs RI
+  mutate(var_type = case_when(
+    grepl("^DM_median_", colname)  ~ "DM",
+    grepl("^cpc_index_", colname) ~ "RI"
+  )) %>%
+  select(-colname)
+
+#-----------------------------
+# 2. Pivot wider to get DM & RI per observation
+#-----------------------------
+grids_wide <- grids_long %>%
+  group_by(STATE, var_type) %>%
+  mutate(obs = row_number()) %>%
+  ungroup() %>%
+  pivot_wider(
+    id_cols = c(STATE, obs),
+    names_from = var_type,
+    values_from = value
+  )
+
+#-----------------------------
+# 3. Create classes & combo factor
+#-----------------------------
+grids_wide <- grids_wide %>%
+  mutate(
+    DM_class = ifelse(DM >= high_drought_threshold, "D4", "Other"),
+    RI_class = ifelse(RI <= ri_threshold, "Payout", "No Payout"),
+    case_high_drought = DM >= high_drought_threshold,
+    case_ri_threshold = RI <= ri_threshold,
+    combo = factor(
+      paste(case_high_drought, case_ri_threshold, sep = "_"),
+      levels = c("FALSE_FALSE", "FALSE_TRUE", "TRUE_FALSE", "TRUE_TRUE"),
+      labels = c("No drought without payout", 
+                 "No drought with payout",
+                 "Drought without payout", 
+                 "Drought with payout")
+    )
+  )
+
+#-----------------------------
+# 4. Aggregate by state
+#-----------------------------
+combo_summary <- grids_wide %>%
+  group_by(STATE, combo) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(STATE) %>%
+  mutate(percent = n / sum(n)) %>%
+  ungroup() %>%
+  select(-n) %>%
+  pivot_wider(
+    names_from = combo,
+    values_from = percent
+  )
+
+#-----------------------------
+# 5. Add total row
+#-----------------------------
+total_row <- grids_wide %>%
+  group_by(combo) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(percent = n / sum(n)) %>%
+  select(-n) %>%
+  pivot_wider(
+    names_from = combo,
+    values_from = percent
+  ) %>%
+  mutate(STATE = "TOTAL") %>%
+  select(STATE, everything())
+
+final_combo_table <- bind_rows(combo_summary, total_row) 
+
+final_combo_table <- final_combo_table %>%
+  mutate(
+    across(2:3, 
+           ~ paste0(format(round(as.numeric(sub("%","",.x)), 3)*100, nsmall=1), "%")),
+    # Keep STATE as is
+    # Format last two columns with 1 decimal
+    across((ncol(final_combo_table)-1):ncol(final_combo_table), 
+           ~ paste0(format(round(as.numeric(sub("%","",.x)), 3)*100, nsmall=1), "%"))
+  )
+
+final_combo_table
+
+export_df_to_latex(
+  df = final_combo_table,
+  file_path = here("data/outputs/tables/RI_DM_combo.tex"),
+  caption = "Combinations of RI Payouts and DM Exceptional drought classifications, 2010-2025"
+)
+
+
+
+
+
+```
+
+
+## RI line plot by year
+
+```{r}
+
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(sf)
+
+#-----------------------------
+# 1. Settings
+#-----------------------------
+years <- 2010:2025
+intervals <- 625:635
+
+thresholds <- c(0.70, 0.80, 0.90)
+
+RI_cols <- expand.grid(years, intervals) |>
+  apply(1, \(x) paste0("cpc_index_", x[1], "_", x[2]))
+
+#-----------------------------
+# 2. Pivot RI long
+#-----------------------------
+ri_long <- grids %>%
+  st_drop_geometry() %>%
+  select(all_of(RI_cols)) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "colname",
+    values_to = "RI"
+  ) %>%
+  # Extract year + interval
+  mutate(
+    year = as.integer(str_extract(colname, "(?<=cpc_index_)\\d{4}")),
+    interval = as.integer(str_extract(colname, "(?<=_)\\d{3}$"))
+  ) %>%
+  filter(!is.na(RI))
+
+#-----------------------------
+# 3. Expand for all thresholds
+#-----------------------------
+ri_thresh_long <- ri_long %>%
+  crossing(threshold = thresholds) %>%
+  mutate(
+    payout = RI <= threshold
+  )
+
+#-----------------------------
+# 4. Aggregate % payout by year
+#-----------------------------
+ts_data <- ri_thresh_long %>%
+  group_by(year, threshold) %>%
+  summarise(
+    pct_payout = mean(payout) * 100,
+    .groups = "drop"
+  )
+
+#-----------------------------
+# 5. Plot
+#-----------------------------
+# 1. Load required libraries
+
+# 2. Example plot object (replace df + vars with yours)
+library(dplyr)
+library(ggplot2)
+
+# 1. Data for line labels (last year only, selected thresholds)
+line_labels <- ts_data %>%
+  filter(threshold %in% c(0.9, 0.8, 0.7)) %>%
+  group_by(threshold) %>%
+  filter(year == max(year)) %>%
+  ungroup()
+
+line_labels$label = paste0("RI = ", str_pad(line_labels$threshold, side = "right", pad = 0, width = 4))
+
+p_ri_year <- ggplot(ts_data, aes(x = year, y = pct_payout, group = threshold)) +
+  
+  # Grey thin lines (all except 0.90)
+  geom_line(
+    data = ts_data %>% filter(threshold != 0.90),
+    color = "grey60",
+    linewidth = 0.6
+  ) +
+  
+  # Bold black 0.90 line
+  geom_line(
+    data = ts_data %>% filter(threshold == 0.90),
+    color = "black",
+    linewidth = 1.4
+  ) +
+  
+  # 2. Line end labels
+  geom_text(
+    data = line_labels,
+    aes(label = label),
+    hjust = 0.5,          # push text slightly right
+    vjust = 0.4,
+    size = 3.8
+  ) +
+  
+  scale_x_continuous(breaks = seq(2010, 2025, 2)) +
+  
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 10),
+    expand = c(0, 0)
+  ) +
+  
+  labs(
+    title = "Percent of Grid-Intervals Triggering PRF Payouts by Year",
+    subtitle = "RI Threshold Sensitivity",
+    x = "Year",
+    y = "Percent of Grid-Intervals with Payout"
+  ) +
+  
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+
+png(here("data/outputs/figures/p_ri_year.png"),
+    width = 600,
+    height = 400)
+plot(p_ri_year)
+dev.off()
+
+
+
+
+
+
+```
+
+
+## DM by year plot
+
+```{r}
+
+
+library(dplyr)
+library(ggplot2)
+library(here)
+
+#-----------------------------
+# 1. Settings
+#-----------------------------
+years <- 2010:2025
+intervals <- 625:635
+dm_thresholds <- 0:4  # thresholds for DM
+
+#-----------------------------
+# 2. Compute % of grid-intervals per year and threshold
+#-----------------------------
+ts_dm_data <- expand.grid(year = years, threshold = dm_thresholds) %>%
+  rowwise() %>%
+  mutate(
+    # Store columns as a list
+    DM_median_cols = list(paste0("DM_median_", year, "_", intervals)),
+    
+    # Compute #cells >= threshold
+    n_hit = sum(as.matrix(grids[, DM_median_cols]) >= threshold, na.rm = TRUE),
+    
+    # Total valid cells
+    n_total = sum(!is.na(as.matrix(grids[, DM_median_cols]))),
+    
+    pct_grids = n_hit / n_total * 100
+  ) %>%
+  ungroup() %>%
+  select(year, threshold, pct_grids)
+
+#-----------------------------
+# 3. Line-end labels (last year)
+#-----------------------------
+line_labels <- ts_dm_data %>%
+  filter(year == max(year)) %>%
+  mutate(label = paste0("DM ≥ ", threshold))
+
+#-----------------------------
+# 4. Plot
+#-----------------------------
+p_dm_year <- ggplot(ts_dm_data, aes(x = year, y = pct_grids, group = threshold)) +
+  
+  # Thin grey lines for DM 0–3
+  geom_line(data = ts_dm_data %>% filter(threshold != 4),
+            color = "grey60", linewidth = 0.6) +
+  
+  # Thick black line for DM 4
+  geom_line(data = ts_dm_data %>% filter(threshold == 4),
+            color = "black", linewidth = 1.4) +
+  
+  # Line-end labels
+  geom_text(data = line_labels,
+            aes(label = label),
+            hjust = 0.4,
+            vjust = 0.5,
+            size = 3.8) +
+  
+  scale_x_continuous(breaks = seq(2010, 2025, 2)) +
+  
+  scale_y_continuous(limits = c(0, 100),
+                     breaks = seq(0, 100, 10),
+                     expand = c(0, 0)) +
+  
+  labs(
+    title = "Percent of Grid-Intervals by Drought Severity",
+    subtitle = "DM Threshold Sensitivity",
+    x = "Year",
+    y = "Percent of Grid-Intervals Meeting Threshold"
+  ) +
+  
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+p_dm_year
+#-----------------------------
+# 5. Export PNG
+#-----------------------------
+png(here("data/outputs/figures/p_dm_year.png"),
+    width = 600, height = 400)
+
+plot(p_dm_year)
+
+dev.off()
+
+```
+
+## missed payout by year
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+library(here)
+
+#-----------------------------
+# 1. Settings
+#-----------------------------
+years <- 2010:2025
+intervals <- 625:635
+ri_threshold <- 0.9
+dm_threshold <- 4
+
+#-----------------------------
+# 2. Compute % for DM=4 total and split by RI
+#-----------------------------
+ts_dm_ri <- lapply(years, function(yr){
+  
+  DM_cols <- paste0("DM_median_", yr, "_", intervals)
+  RI_cols <- paste0("cpc_index_", yr, "_", intervals)
+  
+  dm_vals <- as.matrix(grids[, DM_cols])
+  ri_vals <- as.matrix(grids[, RI_cols])
+  
+  # Total DM >= 4
+  total_hit <- sum(dm_vals >= dm_threshold, na.rm = TRUE)
+  total_cells <- sum(!is.na(dm_vals))
+  pct_dm4 <- total_hit / total_cells * 100
+  
+  # DM >=4 AND RI <= 0.9
+  payout_hit <- sum(dm_vals >= dm_threshold & ri_vals <= ri_threshold, na.rm = TRUE)
+  pct_payout <- payout_hit / total_cells * 100
+  
+  # DM >=4 AND RI > 0.9
+  no_payout_hit <- sum(dm_vals >= dm_threshold & ri_vals > ri_threshold, na.rm = TRUE)
+  pct_no_payout <- no_payout_hit / total_cells * 100
+  
+  data.frame(
+    year = yr,
+    pct_dm4 = pct_dm4,
+    pct_payout = pct_payout,
+    pct_no_payout = pct_no_payout
+  )
+  
+}) %>% bind_rows()
+
+#-----------------------------
+# 3. Plot
+#-----------------------------
+p_dm4_zoom <- ggplot(ts_dm_ri, aes(x = year)) +
+  
+  # DM >=4 total (optional, black line)
+  geom_line(aes(y = pct_dm4), color = "black", linewidth = 1.2) +
+  
+  # DM=4 & RI <=0.9
+  geom_line(aes(y = pct_payout), color = "blue", linewidth = 1.2) +
+  
+  # DM=4 & RI >0.9
+  geom_line(aes(y = pct_no_payout), color = "red", linewidth = 1.2) +
+  
+  scale_x_continuous(breaks = seq(2010, 2025, 2)) +
+  scale_y_continuous(limits = c(0, 25), breaks = seq(0, 25, 5), expand = c(0, 0)) +
+  
+  labs(
+    title = "DM = 4 Grid-Intervals Split by RI",
+    subtitle = "Blue = payout (RI ≤ 0.9), Red = no payout (RI > 0.9)",
+    x = "Year",
+    y = "Percent of Grid-Intervals"
+  ) +
+  
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+p_dm4_zoom
+
+#-----------------------------
+# 4. Export PNG
+#-----------------------------
+png(here("data/outputs/figures/p_dm4_zoom.png"),
+    width = 600, height = 400)
+
+plot(p_dm4_zoom)
+
+dev.off()
+
+
+
+
+
+
+
+
+
+
+
+```
+
+## heat maps
+
+
+
+
+
+## lag analysis (during drought by month, what is the % likelihood of a payout)
+## also, perhaps, categorize droughts by length for a grid cell, are short/long droughts more likely to receive a payout? 
+
+
+
+
+
+
+## sample grid maps
+```{r}
+
+# 1. Recode values
+grids <- grids %>%
+  mutate(DM_class = ifelse(DM_median_2022_631 >= high_drought_threshold, "D4", "Other")) %>% 
+  mutate(RI_class = ifelse(cpc_index_2022_631 <= ri_threshold, "Payout", "No Payout")) %>% 
+  mutate(case_high_drought = ifelse(DM_median_2022_631 >= high_drought_threshold, TRUE, FALSE)) %>% 
+  mutate(case_ri_threshold = ifelse(cpc_index_2022_631 <= ri_threshold, TRUE, FALSE))
+
+
+
+# 2. Plot with two classes
+ggplot(grids) +
+  geom_sf(aes(fill = DM_class), color = NA) +
+  scale_fill_manual(
+    values = c(
+      "D4" = "darkred",
+      "Other" = "grey"
+    ),
+    name = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  labs(title = "Max USDM July–August 2022")
+
+ggplot(grids) +
+  geom_sf(aes(fill = RI_class), color = NA) +
+  scale_fill_manual(
+    values = c(
+      "Payout" = "darkred",
+      "No Payout" = "grey"
+    ),
+    name = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  labs(title = "PRF Payouts July–August 2022")
+
+
+```
+
+## crosstab map
+
+```{r}
+
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(tigris)
+
+options(tigris_use_cache = TRUE)
+
+grids_collapsed <- grids
+
+grids_collapsed$combo <- with(grids_collapsed,
+  factor(
+    paste(case_high_drought, case_ri_threshold, sep = "_"),
+    levels = c("FALSE_FALSE", "FALSE_TRUE", "TRUE_FALSE", "TRUE_TRUE"),
+    labels = c("No drought without payout", 
+               "No drought with payout",
+               "Drought without payout", "Drought with payout")
+  )
+)
+#-----------------------------
+# 2. Get AOI State polygons
+#-----------------------------
+states_aoi <- states(cb = TRUE, resolution = "20m") %>%
+  filter(STUSPS %in% aoi_states) %>%
+  st_transform(st_crs(grids_collapsed))  # match CRS of grids_collapsed
+
+#-----------------------------
+# 3. Clip grids_collapsed to AOI
+#-----------------------------
+grids_aoi <- st_intersection(grids_collapsed, st_union(states_aoi)) %>%
+  filter(!is.na(combo))  # remove NA values
+
+#-----------------------------
+# 4. Recreate combo factor (if needed)
+#-----------------------------
+grids_aoi$combo <- factor(
+  grids_aoi$combo,
+  levels = c("No drought without payout", 
+             "No drought with payout",
+             "Drought without payout", 
+             "Drought with payout")
+)
+
+combo_colors <- c(
+  "No drought without payout" = "lightgrey",
+  "No drought with payout" = "skyblue",
+  "Drought without payout" = "red",
+  "Drought with payout" = "orange"
+)
+
+#-----------------------------
+# 5. Plot
+#-----------------------------
+p_crosstab <- ggplot() +
+  geom_sf(data = grids_aoi, aes(fill = combo), color = NA) +
+  geom_sf(data = states_aoi, fill = NA, color = "black", linewidth = 0.5) +
+  scale_fill_manual(
+    values = combo_colors,
+    name = "Drought / Payout Classification"
+  ) +
+  labs(title = "Crosstab Map : DM = 4 vs RI ≤ 0.9 July–August 2022") +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+
+
+png(here("data/outputs/figures/p_crosstab.png"),
+    width = 800,
+    height = 600)
+plot(p_crosstab)
+dev.off()
+
+
+```
+
+
+
+
+## crosstab table - all years 
+
+```{r}
+
+years <- start_year:end_year
+intervals <- 625:635
+
+for (year in years) {
+  for (interval in intervals) {
+    # Construct column names dynamically
+    dm_col <- paste0("DM_median_", year, "_", interval)
+    ri_col <- paste0("cpc_index_", year, "_", interval)
+    
+    case_dm_col <- paste0("case_high_drought_", year, "_", interval)
+    case_ri_col <- paste0("case_ri_threshold_", year, "_", interval)
+    combo_col   <- paste0("combo_", year, "_", interval)
+    
+    # Only create if both source columns exist
+    if (all(c(dm_col, ri_col) %in% names(grids_collapsed))) {
+      
+      # Boolean columns
+      grids_collapsed[[case_dm_col]] <- grids_collapsed[[dm_col]] == 4
+      grids_collapsed[[case_ri_col]] <- grids_collapsed[[ri_col]] <= 0.9
+      
+      # Combo factor column
+      grids_collapsed[[combo_col]] <- with(grids_collapsed,
+        factor(
+          paste(grids_collapsed[[case_dm_col]], grids_collapsed[[case_ri_col]], sep = "_"),
+          levels = c("FALSE_FALSE", "FALSE_TRUE", "TRUE_FALSE", "TRUE_TRUE"),
+          labels = c("Neither", "RI only", "DM only", "Both")
+        )
+      )
+    }
+  }
+}
+
+# Initialize count vectors
+dm_only     <- integer(nrow(grids_collapsed))
+ri_only     <- integer(nrow(grids_collapsed))
+both        <- integer(nrow(grids_collapsed))
+neither     <- integer(nrow(grids_collapsed))
+total_valid <- integer(nrow(grids_collapsed))  # count of total comparisons per row
+
+# Loop through each year and interval
+for (year in years) {
+  for (interval in intervals) {
+    dm_col <- paste0("case_high_drought_", year, "_", interval)
+    ri_col <- paste0("case_ri_threshold_", year, "_", interval)
+    
+    # Only proceed if both columns exist
+    if (all(c(dm_col, ri_col) %in% names(grids_collapsed))) {
+      dm_vals <- grids_collapsed[[dm_col]]
+      ri_vals <- grids_collapsed[[ri_col]]
+      
+      valid <- !is.na(dm_vals) & !is.na(ri_vals)  # handle missing data safely
+      total_valid <- total_valid + valid
+      
+      dm_only     <- dm_only     + (dm_vals & !ri_vals)
+      ri_only     <- ri_only     + (!dm_vals & ri_vals)
+      both        <- both        + (dm_vals & ri_vals)
+      neither     <- neither     + (!dm_vals & !ri_vals)
+    }
+  }
+}
+
+# Add raw count columns
+grids_collapsed$dm_only_count  <- dm_only
+grids_collapsed$ri_only_count  <- ri_only
+grids_collapsed$both_count     <- both
+grids_collapsed$neither_count  <- neither
+grids_collapsed$total_valid    <- total_valid
+
+grids_collapsed$dm_true_count <- grids_collapsed$dm_only_count + grids_collapsed$both_count
+
+grids_collapsed$missed_payout_pct <- 100*(grids_collapsed$dm_only_count/grids_collapsed$dm_true_count)
+
+# Calculate percentages for each class
+grids_collapsed$dm_only_pct   <- 100 * grids_collapsed$dm_only_count / grids_collapsed$total_valid
+grids_collapsed$ri_only_pct   <- 100 * grids_collapsed$ri_only_count / grids_collapsed$total_valid
+grids_collapsed$both_pct      <- 100 * grids_collapsed$both_count    / grids_collapsed$total_valid
+grids_collapsed$neither_pct   <- 100 * grids_collapsed$neither_count / grids_collapsed$total_valid
+
+summary_table <- grids_collapsed %>%
+  st_drop_geometry() %>%  # remove spatial data for printing
+  select(dm_only_pct, ri_only_pct, both_pct, neither_pct) %>%
+  summarise(across(everything(), ~ round(mean(.x, na.rm = TRUE), 1)))
+
+print(summary_table)
+
+```
+
+
+## crosstab table
+```{r}
+
+# Sum total counts across all rows
+dm_only_total   <- sum(grids_collapsed$dm_only_count, na.rm = TRUE)
+ri_only_total   <- sum(grids_collapsed$ri_only_count, na.rm = TRUE)
+both_total      <- sum(grids_collapsed$both_count, na.rm = TRUE)
+neither_total   <- sum(grids_collapsed$neither_count, na.rm = TRUE)
+
+# Total number of valid combinations evaluated
+total_combos <- dm_only_total + ri_only_total + both_total + neither_total
+
+# Percentages
+dm_only_pct   <- 100 * dm_only_total / total_combos
+ri_only_pct   <- 100 * ri_only_total / total_combos
+both_pct      <- 100 * both_total / total_combos
+neither_pct   <- 100 * neither_total / total_combos
+
+# Print summary
+summary_table <- data.frame(
+  category = c("DM only", "RI only", "Both", "Neither"),
+  count    = c(dm_only_total, ri_only_total, both_total, neither_total),
+  percent  = round(c(dm_only_pct, ri_only_pct, both_pct, neither_pct), 1)
+)
+
+print(summary_table)
+
+```
+
+
+
+## absent payout %
+```{r}
+
+library(RColorBrewer)
+
+
+# Plot: Continuous scale with viridis "C" reversed
+ggplot(data = grids_collapsed) +
+  geom_sf(aes(fill = missed_payout_pct), color = NA) +
+  scale_fill_viridis_c(
+    name = "% Absent Payout",
+    option = "C",
+    direction = -1,
+    limits = c(0, 100),
+    na.value = "grey90"  # NA values in light grey
+  ) +
+  labs(title = "Absent Payout % by Grid Cell") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+
+```
+
+## absent payout count
+
+```{r}
+
+grids_collapsed$dm_only_count[is.na(grids_collapsed$missed_payout_pct)] <- NA
+
+# Plot: Continuous scale with viridis "C" reversed
+ggplot(data = grids_collapsed) +
+  geom_sf(aes(fill = dm_only_count), color = NA) +
+  scale_fill_viridis_c(
+    name = "# Absent Payouts",
+    option = "C",
+    direction = -1,
+    na.value = "grey90"  # NA values in light grey
+  ) +
+  labs(title = paste0("Absent Payout Count ", start_year, "-", end_year)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+
+
+```
+
+
+```{r}
+
+save(grids_collapsed, file = here("data/grids_collapsed.rda"))
+
+```
+
+
+
+
+
+```{r}
+
+
+# 1. Gather DM_median columns into long format
+dm_long <- grids %>% st_drop_geometry() %>% 
+  select(starts_with("cpc_index_")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "var",
+    values_to = "RI"
+  )
+
+# 2. Extract year and interval from the column names
+dm_long <- dm_long %>%
+  mutate(
+    var = str_remove(var, "cpc_index_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  )
+
+
+# 4. Summarize: for each year, calculate % of intervals with DM ≥ 3
+dm_summary <- dm_long %>%
+  group_by(year) %>%
+  summarise(
+    mean_ri = mean(RI, na.rm = TRUE)
+  )
+
+# 5. Plot
+ggplot(dm_summary, aes(x = year, y = mean_ri)) +
+  geom_line(color = "firebrick", size = 1.2) +
+  geom_point(color = "black") +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(
+    x = "Year",
+    y = "Mean RI",
+    title = "Mean RI by Year"
+  ) +
+  ylim(0,2) +
+  theme_minimal(base_size = 14)
+
+
+
+
+
+
+```
+
+
+
+### % obs for different RI thresholds
+
+```{r}
+
+# 1. Gather DM_median columns into long format
+dm_long <- grids %>% st_drop_geometry() %>% 
+  select(starts_with("cpc_index_")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "var",
+    values_to = "RI"
+  )
+
+# 2. Extract year and interval from the column names
+dm_long <- dm_long %>%
+  mutate(
+    var = str_remove(var, "cpc_index_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  )
+
+
+# 4. Summarize: for each year, calculate % of intervals with RI < thresholds
+for(threshold in seq(0.7, 0.9, 0.05)){
+  print(threshold)
+  pct <- 100*(sum(dm_long$RI < threshold)/nrow(dm_long))
+  print(paste0(round(pct, 1), "%"))
+}
+
+
+
+```
+
+### summary stats, DM category
+```{r}
+
+# 1. Gather DM_median columns into long format
+dm_long <- grids %>% st_drop_geometry() %>% 
+  select(starts_with("DM_median_")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "var",
+    values_to = "DM_value"
+  )
+
+# 2. Extract year and interval from the column names
+dm_long <- dm_long %>%
+  mutate(
+    var = str_remove(var, "DM_median_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  )
+
+
+# 4. Summarize: for each year, calculate % of intervals with RI < thresholds
+for(threshold in seq(0, 4, 1)){
+  print(threshold)
+  pct <- 100*(sum(dm_long$DM_value >= threshold)/nrow(dm_long))
+  print(paste0(round(pct, 1), "%"))
+}
+
+
+```
+
+
+## by year, >= 3, 4
+
+```{r}
+
+
+
+# 1. Gather DM_median columns into long format
+dm_long <- grids %>% st_drop_geometry() %>% 
+  select(starts_with("DM_median_")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "var",
+    values_to = "dm_value"
+  )
+
+# 2. Extract year and interval from the column names
+dm_long <- dm_long %>%
+  mutate(
+    var = str_remove(var, "DM_median_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  )
+
+# 3. For each row (site × interval), define if DM ≥ 3
+dm_long <- dm_long %>%
+  mutate(high_dm = dm_value >= 3)
+
+# 4. Summarize: for each year, calculate % of intervals with DM ≥ 3
+dm_summary <- dm_long %>%
+  group_by(year) %>%
+  summarise(
+    pct_high_dm = mean(high_dm, na.rm = TRUE) * 100
+  )
+
+# 5. Plot
+ggplot(dm_summary, aes(x = year, y = pct_high_dm)) +
+  geom_line(color = "firebrick", size = 1.2) +
+  geom_point(color = "black") +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(
+    x = "Year",
+    y = "% intervals where max DM ≥ 3",
+    title = "High Drought Frequency by Year"
+  ) +
+  ylim(0,100) +
+  theme_minimal(base_size = 14)
+
+
+# 3. For each row (site × interval), define if DM ≥ 4
+dm_long <- dm_long %>%
+  mutate(high_dm = dm_value >= 4)
+
+# 4. Summarize: for each year, calculate % of intervals with DM ≥ 4
+dm_summary <- dm_long %>%
+  group_by(year) %>%
+  summarise(
+    pct_high_dm = mean(high_dm, na.rm = TRUE) * 100
+  )
+
+# 5. Plot
+ggplot(dm_summary, aes(x = year, y = pct_high_dm)) +
+  geom_line(color = "firebrick", size = 1.2) +
+  geom_point(color = "black") +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(
+    x = "Year",
+    y = "% intervals where max DM ≥ 4",
+    title = "High Drought Frequency by Year"
+  ) +
+  ylim(0,100) +
+  theme_minimal(base_size = 14)
+
+
+
+```
+
+
+## intervals >=3, >= 4
+
+```{r}
+
+
+# 1. Make sure you have the correct long format
+dm_long <- grids %>% st_drop_geometry() %>% 
+  select(starts_with("DM_median_")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "var",
+    values_to = "dm_value"
+  ) %>%
+  mutate(
+    var = str_remove(var, "DM_median_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  ) %>%
+  filter(!is.na(dm_value)) %>%
+  mutate(high_dm = dm_value >= 3)
+
+# 2. Summarize: % of rows × years where DM_median ≥ 3 by interval
+interval_summary <- dm_long %>%
+  group_by(interval) %>%
+  summarise(
+    pct_high_dm = mean(high_dm) * 100,
+    .groups = "drop"
+  )
+
+# 3. Create readable interval labels
+interval_labels <- tibble(
+  interval = 625:635,
+  label = paste0(
+    month.abb[interval_start_months[as.character(625:635)]],
+    "-",
+    month.abb[interval_end_months[as.character(625:635)]]
+  )
+)
+
+# 4. Join labels
+interval_summary <- interval_summary %>%
+  left_join(interval_labels, by = "interval")
+
+# 5. Plot
+ggplot(interval_summary, aes(x = factor(label, levels = label), y = pct_high_dm)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    x = "Interval",
+    y = "% obs with DM ≥ 3",
+    title = "High Drought Frequency by Calendar Interval"
+  ) +
+  theme_minimal(base_size = 14) +  
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),         # major breaks every 20
+    minor_breaks = seq(0, 100, 10)    # minor breaks every 10
+  ) 
+
+
+
+# 1. Make sure you have the correct long format
+dm_long <- grids %>% st_drop_geometry() %>% 
+  select(starts_with("DM_median_")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "var",
+    values_to = "dm_value"
+  ) %>%
+  mutate(
+    var = str_remove(var, "DM_median_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  ) %>%
+  filter(!is.na(dm_value)) %>%
+  mutate(high_dm = dm_value >= 4)
+
+# 2. Summarize: % of rows × years where DM_median ≥ 4 by interval
+interval_summary <- dm_long %>%
+  group_by(interval) %>%
+  summarise(
+    pct_high_dm = mean(high_dm) * 100,
+    .groups = "drop"
+  )
+
+# 3. Create readable interval labels
+interval_labels <- tibble(
+  interval = 625:635,
+  label = paste0(
+    month.abb[interval_start_months[as.character(625:635)]],
+    "-",
+    month.abb[interval_end_months[as.character(625:635)]]
+  )
+)
+
+# 4. Join labels
+interval_summary <- interval_summary %>%
+  left_join(interval_labels, by = "interval")
+
+# 5. Plot
+ggplot(interval_summary, aes(x = factor(label, levels = label), y = pct_high_dm)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    x = "Interval",
+    y = "% obs with DM ≥ 4",
+    title = "High Drought Frequency by Calendar Interval"
+  ) +
+  theme_minimal(base_size = 14) +  
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),         # major breaks every 20
+    minor_breaks = seq(0, 100, 10)    # minor breaks every 10
+  ) 
+
+```
+
+
+## heatmap DM = 4
+
+```{r}
+
+
+
+# Step 1: Long format
+dm_long <- grids %>% st_drop_geometry() %>% 
+  select(starts_with("DM_median_")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "var",
+    values_to = "dm_value"
+  ) %>%
+  mutate(
+    var = str_remove(var, "DM_median_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  ) %>%
+  filter(!is.na(dm_value)) %>%
+  mutate(high_dm = dm_value >= 4)
+
+# Step 2: Summarize by year × interval
+heatmap_data <- dm_long %>%
+  group_by(year, interval) %>%
+  summarise(
+    pct_high_dm = mean(high_dm) * 100,
+    .groups = "drop"
+  )
+
+# Step 3: Add readable interval labels
+interval_labels <- tibble(
+  interval = 625:635,
+  label = paste0(
+    month.abb[interval_start_months[as.character(625:635)]],
+    "-",
+    month.abb[interval_end_months[as.character(625:635)]]
+  )
+)
+
+heatmap_data <- heatmap_data %>%
+  left_join(interval_labels, by = "interval") %>%
+  mutate(label = factor(label, levels = interval_labels$label))  # Preserve order
+
+
+#-----------------------------
+# Step 4: Plot heatmap with 0% in white
+#-----------------------------
+#-----------------------------
+# Determine max value for color scaling
+#-----------------------------
+max_val <- max(heatmap_data$pct_high_dm, na.rm = TRUE)
+
+# Small epsilon above 0 to allow white for 0
+eps <- 0.0001
+
+#-----------------------------
+# Plot heatmap
+#-----------------------------
+p_heatmap_dm <- ggplot(heatmap_data, aes(x = label, y = factor(year), fill = pct_high_dm)) +
+  geom_tile(color = "lightgrey", linewidth = 0.3) +  # light grey lines
+  
+  # Color ramp: white for 0, viridis from just above 0 to max_val
+  scale_fill_gradientn(
+    colors = c("white", viridis(100, option = "C", direction = -1)),
+    values = rescale(c(0, eps, seq(eps, max_val, length.out = 100))),
+    limits = c(0, max_val),
+    name = "% DM = 4",
+    na.value = "grey90"
+  ) +
+  
+  labs(
+    x = "Interval",
+    y = "Year",
+    title = "Heatmap of High Drought Frequency (DM Max = 4)",
+    fill = "% High DM"
+  ) +
+  
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+png(here("data/outputs/figures/heatmap_DM.png"),
+    width = 800,
+    height = 600)
+plot(p_heatmap_dm)
+dev.off()
+
+```
+
+## heatmap RI
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(viridis)
+library(here)
+
+#-----------------------------
+# 1. Long format RI
+#-----------------------------
+ri_long <- grids %>%
+  st_drop_geometry() %>%
+  select(starts_with("cpc_index_")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "var",
+    values_to = "RI"
+  ) %>%
+  mutate(
+    var = str_remove(var, "cpc_index_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  ) %>%
+  filter(!is.na(RI)) %>%
+  mutate(payout = RI <= 0.90)  # threshold for payout
+
+#-----------------------------
+# 2. Summarize by year × interval
+#-----------------------------
+heatmap_ri <- ri_long %>%
+  group_by(year, interval) %>%
+  summarise(
+    pct_payout = mean(payout) * 100,
+    .groups = "drop"
+  )
+
+#-----------------------------
+# 3. Add readable interval labels
+#-----------------------------
+interval_labels <- tibble(
+  interval = 625:635,
+  label = paste0(
+    month.abb[interval_start_months[as.character(625:635)]],
+    "-",
+    month.abb[interval_end_months[as.character(625:635)]]
+  )
+)
+
+heatmap_ri <- heatmap_ri %>%
+  left_join(interval_labels, by = "interval") %>%
+  mutate(label = factor(label, levels = interval_labels$label))  # preserve order
+
+#-----------------------------
+# 4. Determine min/max for color scaling
+#-----------------------------
+min_val <- min(heatmap_ri$pct_payout, na.rm = TRUE)
+max_val <- max(heatmap_ri$pct_payout, na.rm = TRUE)
+
+#-----------------------------
+# 5. Plot RI heatmap
+#-----------------------------
+p_heatmap_ri <- ggplot(heatmap_ri, aes(x = label, y = factor(year), fill = pct_payout)) +
+  geom_tile(color = "lightgrey", linewidth = 0.3) +
+  
+  scale_fill_viridis_c(
+    name = "% Payout (RI ≤ 0.90)",
+    option = "C",
+    direction = -1,
+    limits = c(min_val, max_val)
+  ) +
+  
+  labs(
+    x = "Interval",
+    y = "Year",
+    title = "Heatmap of Payout Frequency (RI ≤ 0.90)",
+    fill = "% Payout"
+  ) +
+  
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+p_heatmap_ri
+#-----------------------------
+# 6. Export PNG
+#-----------------------------
+png(here("data/outputs/figures/heatmap_RI.png"),
+    width = 800,
+    height = 600)
+
+plot(p_heatmap_ri)
+dev.off()
+
+
+
+```
+
+## drought length effects
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+#-----------------------------
+# 1. Identify DM=4 per grid × interval
+#-----------------------------
+# Get only DM_median columns
+dm_cols <- grep("^DM_median_", names(grids), value = TRUE)
+
+dm_long <- grids %>%
+  st_drop_geometry() %>%
+  select(GRIDCODE, all_of(dm_cols)) %>%  # assume grids has a GRIDCODE column
+  pivot_longer(
+    cols = -GRIDCODE,
+    names_to = "var",
+    values_to = "dm_value"
+  ) %>%
+  mutate(
+    dm_flag = as.integer(dm_value >= 4),
+    year = as.integer(substr(var, 8, 11)),
+    interval = as.integer(substr(var, 13, 15))
+  ) %>%
+  arrange(GRIDCODE, year, interval)
+
+#-----------------------------
+# 2. Compute consecutive runs (RLE)
+#-----------------------------
+# For each grid, compute runs of DM=4
+drought_runs <- dm_long %>%
+  group_by(GRIDCODE) %>%
+  summarise(
+    runs = {
+      rle_vals <- rle(dm_flag)
+      # Only keep runs where dm_flag == 1
+      rle_lengths <- rle_vals$lengths[rle_vals$values == 1]
+      list(rle_lengths)
+    },
+    .groups = "drop"
+  ) %>%
+  unnest(cols = c(runs))  # one row per drought event
+
+#-----------------------------
+# 3. Histogram of drought lengths
+#-----------------------------
+hist_data <- drought_runs %>%
+  count(runs) %>%
+  mutate(pct = n / sum(n) * 100)
+
+ggplot(hist_data, aes(x = runs, y = pct)) +
+  geom_bar(stat = "identity", fill = "steelblue", color = "black") +
+  scale_x_continuous(breaks = seq(1, max(hist_data$runs), 1)) +
+  labs(
+    x = "Length of Consecutive DM = 4 Intervals",
+    y = "Percent of Drought Events",
+    title = "Distribution of Exceptional Drought Lengths (DM = 4)"
+  ) +
+  theme_minimal(base_size = 13)
+
+
+
+
+
+```
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+#-----------------------------
+# 1. Compute cumulative distribution
+#-----------------------------
+cum_dist <- drought_runs %>%
+  count(runs) %>%
+  arrange(runs) %>%
+  mutate(
+    pct = n / sum(n) * 100,
+    cum_pct = cumsum(pct)
+  )
+
+#-----------------------------
+# 2. Print cumulative distribution
+#-----------------------------
+print(cum_dist)
+
+# Example output columns:
+# runs     n     pct    cum_pct
+
+#-----------------------------
+# 3. Plot cumulative distribution
+#-----------------------------
+ggplot(cum_dist, aes(x = runs, y = cum_pct)) +
+  geom_step(color = "steelblue", linewidth = 1.2) +
+  geom_point(color = "steelblue", size = 2) +
+  scale_x_continuous(breaks = seq(1, max(cum_dist$runs), 1)) +
+  scale_y_continuous(limits = c(0, 100)) +
+  labs(
+    x = "Length of Consecutive DM = 4 Intervals",
+    y = "Cumulative Percent of Drought Events",
+    title = "Cumulative Distribution of Exceptional Drought Lengths (DM = 4)"
+  ) +
+  theme_minimal(base_size = 13)
+
+```
+
+## drought length by state
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+
+#-----------------------------
+# 1. Add STATE information to drought_runs
+#-----------------------------
+drought_runs_state <- drought_runs %>%
+  left_join(
+    grids %>% st_drop_geometry() %>% select(GRIDCODE, STATE),
+    by = "GRIDCODE"
+  )
+
+#-----------------------------
+# 2. Categorize drought lengths
+#-----------------------------
+drought_runs_state <- drought_runs_state %>%
+  mutate(
+    length_category = case_when(
+      runs >= 1 & runs <= 5 ~ "Short (1-5)",
+      runs >= 6 & runs <= 10 ~ "Medium (6-10)",
+      runs >= 11 ~ "Long (11+)"
+    )
+  )
+
+#-----------------------------
+# 3a. Count table per state
+#-----------------------------
+count_table <- drought_runs_state %>%
+  group_by(STATE, length_category) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  pivot_wider(
+    names_from = length_category,
+    values_from = count,
+    values_fill = 0
+  ) %>%
+  # Ensure column order
+  select(STATE, `Short (1-5)`, `Medium (6-10)`, `Long (11+)`)
+
+# Add TOTAL row
+total_counts <- count_table %>%
+  summarise(across(-STATE, sum)) %>%
+  mutate(STATE = "TOTAL") %>%
+  select(STATE, everything())
+
+count_table <- bind_rows(count_table, total_counts)
+
+#-----------------------------
+# 3b. Percent table per state
+#-----------------------------
+percent_table <- count_table %>%
+  mutate(
+    total = `Short (1-5)` + `Medium (6-10)` + `Long (11+)`,
+    across(c(`Short (1-5)`, `Medium (6-10)`, `Long (11+)`),
+           ~ paste0(round(.x / total * 100), "%"))
+  ) %>%
+  select(-total)
+
+#-----------------------------
+# 4. View tables
+#-----------------------------
+count_table
+percent_table
+
+
+```
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+
+#-----------------------------
+# 1. Add STATE info
+#-----------------------------
+drought_runs_state <- drought_runs %>%
+  left_join(
+    grids %>% st_drop_geometry() %>% select(GRIDCODE, STATE),
+    by = "GRIDCODE"
+  )
+
+#-----------------------------
+# 2. Categorize drought lengths
+#-----------------------------
+drought_runs_state <- drought_runs_state %>%
+  mutate(
+    length_category = case_when(
+      runs >= 1 & runs <= 5 ~ "Short (1-5)",
+      runs >= 6 & runs <= 10 ~ "Medium (6-10)",
+      runs >= 11 ~ "Long (11+)"
+    )
+  )
+
+#-----------------------------
+# 3a. Count table weighted by grid-intervals
+#-----------------------------
+count_table_intervals <- drought_runs_state %>%
+  group_by(STATE, length_category) %>%
+  summarise(grid_intervals = sum(runs), .groups = "drop") %>%   # sum of intervals per category
+  pivot_wider(
+    names_from = length_category,
+    values_from = grid_intervals,
+    values_fill = 0
+  ) %>%
+  select(STATE, `Short (1-5)`, `Medium (6-10)`, `Long (11+)`)  # ensure order
+
+# Add TOTAL row
+total_counts <- count_table_intervals %>%
+  summarise(across(-STATE, sum)) %>%
+  mutate(STATE = "TOTAL") %>%
+  select(STATE, everything())
+
+count_table_intervals <- bind_rows(count_table_intervals, total_counts)
+
+#-----------------------------
+# 3b. Percent table weighted by grid-intervals
+#-----------------------------
+percent_table_intervals <- count_table_intervals %>%
+  mutate(
+    total = `Short (1-5)` + `Medium (6-10)` + `Long (11+)`,
+    across(c(`Short (1-5)`, `Medium (6-10)`, `Long (11+)`),
+           ~ paste0(round(.x / total * 100), "%"))
+  ) %>%
+  select(-total)
+
+#-----------------------------
+# 4. View tables
+#-----------------------------
+count_table_intervals
+percent_table_intervals
+
+
+
+
+
+
+```
+
+## payouts by drought length
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(sf)
+
+conflicts_prefer(dplyr::lag)
+
+#====================================================
+# 1. Build long dataset (DM + RI aligned)
+#====================================================
+long_data <- grids %>%
+  st_drop_geometry() %>%
+  select(
+    GRIDCODE, STATE,
+    starts_with("DM_median_"),
+    starts_with("cpc_index_")
+  ) %>%
+  pivot_longer(
+    cols = -c(GRIDCODE, STATE),
+    names_to = "var",
+    values_to = "value"
+  ) %>%
+  mutate(
+    type = case_when(
+      str_detect(var, "^DM_median_") ~ "DM",
+      str_detect(var, "^cpc_index_") ~ "RI"
+    ),
+    var = str_remove(var, "^DM_median_|^cpc_index_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  ) %>%
+  select(-var) %>%
+  pivot_wider(names_from = type, values_from = value) %>%
+  arrange(GRIDCODE, year, interval)
+
+#====================================================
+# 2. Identify drought runs (DM = 4)
+#====================================================
+long_data <- long_data %>%
+  mutate(
+    drought = DM == 4,
+    payout  = RI <= 0.90
+  ) %>%
+  group_by(GRIDCODE) %>%
+  mutate(
+    drought_group = cumsum(drought != lag(drought, default = FALSE))
+  ) %>%
+  ungroup()
+
+#====================================================
+# 3. Compute drought run length
+#====================================================
+drought_lengths <- long_data %>%
+  filter(drought) %>%
+  group_by(GRIDCODE, drought_group) %>%
+  summarise(
+    run_length = n(),
+    STATE = first(STATE),
+    .groups = "drop"
+  )
+
+long_data <- long_data %>%
+  left_join(
+    drought_lengths,
+    by = c("GRIDCODE", "drought_group", "STATE")
+  )
+
+#====================================================
+# 4. Categorize drought length
+#====================================================
+long_data <- long_data %>%
+  mutate(
+    length_category = case_when(
+      run_length >= 1 & run_length <= 5  ~ "Short (1-5)",
+      run_length >= 6 & run_length <= 10 ~ "Medium (6-10)",
+      run_length >= 11                   ~ "Long (11+)"
+    )
+  )
+
+#====================================================
+# 5. Calculate payout % (interval-weighted)
+#====================================================
+payout_summary <- long_data %>%
+  filter(drought) %>%
+  group_by(STATE, length_category) %>%
+  summarise(
+    total_intervals  = n(),
+    payout_intervals = sum(payout, na.rm = TRUE),
+    payout_pct       = payout_intervals / total_intervals * 100,
+    .groups = "drop"
+  )
+
+#====================================================
+# 6. Format final table
+#====================================================
+payout_table <- payout_summary %>%
+  select(STATE, length_category, payout_pct) %>%
+  pivot_wider(
+    names_from = length_category,
+    values_from = payout_pct
+  ) %>%
+  select(STATE, `Short (1-5)`, `Medium (6-10)`, `Long (11+)`)
+
+# TOTAL row (interval-weighted across all states)
+total_row <- long_data %>%
+  filter(drought) %>%
+  group_by(length_category) %>%
+  summarise(
+    payout_pct = sum(payout, na.rm = TRUE) / n() * 100,
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    names_from = length_category,
+    values_from = payout_pct
+  ) %>%
+  mutate(STATE = "TOTAL") %>%
+  select(STATE, `Short (1-5)`, `Medium (6-10)`, `Long (11+)`)
+
+payout_table <- bind_rows(payout_table, total_row)
+
+# Round and add %
+payout_table <- payout_table %>%
+  mutate(across(-STATE, ~ paste0(round(.x), "%")))
+
+payout_table
+
+
+```
+
+
+
+## lag effects 
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(sf)
+
+#====================================================
+# 1. Build long dataset (DM + RI aligned)
+#====================================================
+long_data <- grids %>%
+  st_drop_geometry() %>%
+  select(
+    GRIDCODE, STATE,
+    starts_with("DM_median_"),
+    starts_with("cpc_index_")
+  ) %>%
+  pivot_longer(
+    cols = -c(GRIDCODE, STATE),
+    names_to = "var",
+    values_to = "value"
+  ) %>%
+  mutate(
+    type = case_when(
+      str_detect(var, "^DM_median_") ~ "DM",
+      str_detect(var, "^cpc_index_") ~ "RI"
+    ),
+    var = str_remove(var, "^DM_median_|^cpc_index_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  ) %>%
+  select(-var) %>%
+  pivot_wider(names_from = type, values_from = value) %>%
+  arrange(GRIDCODE, year, interval)
+
+#====================================================
+# 2. Identify drought runs
+#====================================================
+long_data <- long_data %>%
+  mutate(
+    drought = DM == 4,
+    payout  = RI <= 0.90
+  ) %>%
+  group_by(GRIDCODE) %>%
+  mutate(
+    drought_group = cumsum(drought != dplyr::lag(drought, default = FALSE))
+  ) %>%
+  ungroup()
+
+#====================================================
+# 3. Compute position within each drought
+#====================================================
+drought_positions <- long_data %>%
+  filter(drought) %>%
+  group_by(GRIDCODE, drought_group) %>%
+  mutate(
+    position_in_drought = row_number()
+  ) %>%
+  ungroup()
+
+#====================================================
+# 4. Calculate payout likelihood by position
+#====================================================
+position_summary <- drought_positions %>%
+  group_by(position_in_drought) %>%
+  summarise(
+    total_intervals  = n(),
+    payout_intervals = sum(payout, na.rm = TRUE),
+    payout_prob      = payout_intervals / total_intervals,
+    .groups = "drop"
+  )
+
+#====================================================
+# 5. Plot
+#====================================================
+ggplot(position_summary,
+       aes(x = position_in_drought,
+           y = payout_prob)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    x = "Position Within Consecutive Drought",
+    y = "Likelihood of Payout",
+    title = "Payout Probability by Drought Position",
+    subtitle = "Conditional on DM = 4"
+  ) +
+  theme_minimal(base_size = 13) 
+
+
+ggplot(position_summary,
+       aes(x = position_in_drought,
+           y = total_intervals)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    x = "Position Within Consecutive Drought",
+    y = "Number of Drought Grid-Intervals",
+    title = "Number of Observations by Drought Position",
+    subtitle = "Counts of DM = 4 intervals at each position"
+  ) +
+  theme_minimal(base_size = 13)
+
+
+
+
+```
+
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+
+#====================================================
+# 1. Compute reverse position within each drought
+#====================================================
+reverse_positions <- long_data %>%
+  filter(DM == 4) %>%
+  group_by(GRIDCODE, drought_group) %>%
+  mutate(
+    run_length = n(),
+    position_from_end = run_length - row_number() + 1
+  ) %>%
+  ungroup()
+
+#====================================================
+# 2. Compute payout probability by reverse position
+#====================================================
+reverse_summary <- reverse_positions %>%
+  group_by(position_from_end) %>%
+  summarise(
+    total_intervals  = n(),
+    payout_intervals = sum(RI <= 0.90, na.rm = TRUE),
+    payout_prob      = payout_intervals / total_intervals,
+    .groups = "drop"
+  )
+
+#====================================================
+# 3. Plot payout probability (reverse axis)
+#====================================================
+ggplot(reverse_summary,
+       aes(x = position_from_end,
+           y = payout_prob)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  scale_x_reverse() +   # <-- makes drought end on the right
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    x = "Position from End of Drought",
+    y = "Likelihood of Payout",
+    title = "Payout Probability by Position from Drought End",
+    subtitle = "Conditional on DM = 4"
+  ) +
+  theme_minimal(base_size = 13)
+
+#====================================================
+# 4. Plot observation counts (reverse axis)
+#====================================================
+ggplot(reverse_summary,
+       aes(x = position_from_end,
+           y = total_intervals)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  scale_x_reverse() +
+  labs(
+    x = "Position from End of Drought",
+    y = "Number of Drought Grid-Intervals",
+    title = "Number of Observations by Position from Drought End"
+  ) +
+  theme_minimal(base_size = 13)
+
+
+
+
+```
+
+
+
+
+
+
+
+
+## similar plots for RI
+### year
+
+```{r}
+ 
+# 1. Gather DM_median columns into long format
+dm_long <- grids %>% st_drop_geometry() %>% 
+  select(starts_with("cpc_index_")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "var",
+    values_to = "RI"
+  )
+
+# 2. Extract year and interval from the column names
+dm_long <- dm_long %>%
+  mutate(
+    var = str_remove(var, "cpc_index_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  )
+
+# 3. For each row (site × interval), define if DM ≥ 3
+dm_long <- dm_long %>%
+  mutate(low_ri = RI < ri_threshold)
+
+# 4. Summarize: for each year, calculate % of intervals with DM ≥ 3
+dm_summary <- dm_long %>%
+  group_by(year) %>%
+  summarise(
+    pct_low_ri = mean(low_ri, na.rm = TRUE) * 100
+  )
+
+# 5. Plot
+ggplot(dm_summary, aes(x = year, y = pct_low_ri)) +
+  geom_line(color = "firebrick", size = 1.2) +
+  geom_point(color = "black") +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(
+    x = "Year",
+    y = paste0("% obs where RI ≤ ", ri_threshold), 
+    title = "Low RI Frequency by Year"
+  ) +
+  ylim(0,100) +
+  theme_minimal(base_size = 14)
+
+# # 3. For each row (site × interval), define if DM ≥ 3
+# dm_long <- dm_long %>%
+#   mutate(low_ri = RI < 0.9)
+# 
+# # 4. Summarize: for each year, calculate % of intervals with DM ≥ 3
+# dm_summary <- dm_long %>%
+#   group_by(year) %>%
+#   summarise(
+#     pct_low_ri = mean(low_ri, na.rm = TRUE) * 100
+#   )
+# 
+# # 5. Plot
+# ggplot(dm_summary, aes(x = year, y = pct_low_ri)) +
+#   geom_line(color = "firebrick", size = 1.2) +
+#   geom_point(color = "black") +
+#   scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+#   labs(
+#     x = "Year",
+#     y = "% obs where RI ≤ 0.9", 
+#     title = "High Drought Frequency by Year"
+#   ) +
+#   ylim(0,100) +
+#   theme_minimal(base_size = 14)
+# 
+
+
+```
+
+
+
+## interval
+
+```{r}
+
+
+# 1. Make sure you have the correct long format
+dm_long <- grids %>% st_drop_geometry() %>% 
+  select(starts_with("cpc_index")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "var",
+    values_to = "RI"
+  ) %>%
+  mutate(
+    var = str_remove(var, "cpc_index_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  ) %>%
+  filter(!is.na(RI)) %>%
+  mutate(low_ri = RI < ri_threshold)
+
+# 2. Summarize: % of rows × years where DM_median ≥ 3 by interval
+interval_summary <- dm_long %>%
+  group_by(interval) %>%
+  summarise(
+    pct_low_ri = mean(low_ri) * 100,
+    .groups = "drop"
+  )
+
+# 3. Create readable interval labels
+interval_labels <- tibble(
+  interval = 625:635,
+  label = paste0(
+    month.abb[interval_start_months[as.character(625:635)]],
+    "-",
+    month.abb[interval_end_months[as.character(625:635)]]
+  )
+)
+
+# 4. Join labels
+interval_summary <- interval_summary %>%
+  left_join(interval_labels, by = "interval")
+
+# 5. Plot
+ggplot(interval_summary, aes(x = factor(label, levels = label), y = pct_low_ri)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    x = "Interval",
+    y = paste0("% obs where RI ≤ ", ri_threshold),
+    title = "Low RI by Calendar Interval"
+  ) +
+  theme_minimal(base_size = 14) +  
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20),         # major breaks every 20
+    minor_breaks = seq(0, 100, 10)    # minor breaks every 10
+  ) 
+
+
+
+
+```
+
+
+## heatmap
+
+```{r}
+
+
+# Step 1: Long format
+dm_long <- grids %>% st_drop_geometry() %>% 
+  select(starts_with("cpc_index_")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "var",
+    values_to = "RI"
+  ) %>%
+  mutate(
+    var = str_remove(var, "cpc_index_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  ) %>%
+  filter(!is.na(RI)) %>%
+  mutate(low_ri = RI < ri_threshold)
+
+# Step 2: Summarize by year × interval
+heatmap_data <- dm_long %>%
+  group_by(year, interval) %>%
+  summarise(
+    pct_low_ri = mean(low_ri) * 100,
+    .groups = "drop"
+  )
+
+# Step 3: Add readable interval labels
+interval_labels <- tibble(
+  interval = 625:635,
+  label = paste0(
+    month.abb[interval_start_months[as.character(625:635)]],
+    "-",
+    month.abb[interval_end_months[as.character(625:635)]]
+  )
+)
+
+heatmap_data <- heatmap_data %>%
+  left_join(interval_labels, by = "interval") %>%
+  mutate(label = factor(label, levels = interval_labels$label))  # Preserve order
+
+# Step 4: Plot heatmap
+ggplot(heatmap_data, aes(x = label, y = factor(year), fill = pct_low_ri)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(name = paste0("% RI ≤ ", ri_threshold), option = "C", direction = -1) +
+  labs(
+    x = "Interval",
+    y = "Year",
+    title = paste0("Heatmap of Low RI Frequency (RI ≤ ", ri_threshold, ")"),
+    fill = "% Low RI"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+```
+
+## payouts
+
+
+
+## chatgpt, DM ≥3
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+
+# 1. Pivot DM_median columns to long
+
+dm_long <- grids %>%
+  st_drop_geometry() %>%
+  select(GRIDCODE, starts_with("DM_median_")) %>%
+  pivot_longer(
+    cols = starts_with("DM_median_"),
+    names_to = "var",
+    values_to = "dm_value"
+  ) %>%
+  mutate(
+    var = str_remove(var, "DM_median_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6)),
+    row_id = row_number()  # optional: track row identity
+  )
+
+# 2. Pivot cpc_index columns to long
+cpc_long <- grids %>% st_drop_geometry() %>% 
+  select(GRIDCODE, starts_with("cpc_index_")) %>%
+  pivot_longer(
+    cols = starts_with("cpc_index_"),
+    names_to = "var",
+    values_to = "cpc_value"
+  ) %>%
+  mutate(
+    var = str_remove(var, "cpc_index_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  ) %>%
+  mutate(row_id = row_number())
+
+# 3. Join DM_median and CPC on row + year + interval
+joined <- left_join(dm_long, cpc_long, by = c("GRIDCODE", "row_id", "year", "interval"))
+
+# 4. Filter where DM_median >= 3
+filtered <- joined %>%
+  filter(!is.na(dm_value), dm_value >= 3, !is.na(cpc_value))
+
+# 5. Calculate percentage of cpc_value < ri_threshold among these filtered
+summary_df <- filtered %>%
+  group_by(year) %>%
+  summarise(
+    pct_cpc_below_0_7 = mean(cpc_value < ri_threshold, na.rm = TRUE) * 100,
+    count = n()
+  )
+
+# 6. Plot
+ggplot(summary_df, aes(x = year, y = pct_cpc_below_0_7)) +
+  geom_line(color = "steelblue", size = 1.2) +
+  geom_point(color = "black") +
+  scale_y_continuous(limits = c(0, 100), labels = scales::percent_format(scale = 1)) +
+  labs(
+    x = "Year",
+    y = paste0("% CPC Index < ", ri_threshold, " (where DM_median ≥ 3)"),
+    title = "Frequency of Low CPC Index During High Drought Periods"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+# 4. Filter where DM_median >= 4
+filtered <- joined %>%
+  filter(!is.na(dm_value), dm_value >= 4, !is.na(cpc_value))
+
+# 5. Calculate percentage of cpc_value < ri_threshold among these filtered
+summary_df <- filtered %>%
+  group_by(year) %>%
+  summarise(
+    pct_cpc_below_0_7 = mean(cpc_value < ri_threshold, na.rm = TRUE) * 100,
+    count = n()
+  )
+
+# 6. Plot
+ggplot(summary_df, aes(x = year, y = pct_cpc_below_0_7)) +
+  geom_line(color = "steelblue", size = 1.2) +
+  geom_point(color = "black") +
+  scale_y_continuous(limits = c(0, 100), labels = scales::percent_format(scale = 1)) +
+  labs(
+    x = "Year",
+    y = paste0("% CPC Index < ", ri_threshold, " (where DM_median ≥ 4)"),
+    title = "Frequency of Low CPC Index During High Drought Periods"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+
+```
+
+## missed payouts
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+
+
+# 4. Filter to DM >= 3 observations
+filtered <- joined %>% filter(!is.na(dm_value), dm_value >= 3)
+
+# 5. Calculate counts by year
+summary_counts <- filtered %>%
+  group_by(year) %>%
+  summarise(
+    count_dm_ge_3 = n(),
+    count_missed_payouts = sum(cpc_value >= ri_threshold, na.rm = TRUE)
+  ) %>%
+  pivot_longer(
+    cols = c(count_dm_ge_3, count_missed_payouts),
+    names_to = "metric",
+    values_to = "count"
+  )
+
+# 6. Plot two lines
+ggplot(summary_counts, aes(x = year, y = count, color = metric)) +
+  geom_line(size = 1.2) +
+  geom_point() +
+  scale_color_manual(
+    values = c(count_dm_ge_3 = "steelblue", count_missed_payouts = "firebrick"),
+    labels = c("DM ≥ 3 observations", paste0("Missed payouts (RI ≥ ", ri_threshold, " & DM ≥ 3)"))
+  ) +
+  labs(
+    x = "Year",
+    y = "Count of observations",
+    color = "Metric",
+    title = "Counts by Year of Drought Severity and Missed Payouts"
+  ) +
+  theme_minimal(base_size = 14)
+
+# 4. Filter to DM >= 3 observations
+filtered <- joined %>% filter(!is.na(dm_value), dm_value >= 4)
+
+# 5. Calculate counts by year
+summary_counts <- filtered %>%
+  group_by(year) %>%
+  summarise(
+    count_dm_ge_4 = n(),
+    count_missed_payouts = sum(cpc_value >= ri_threshold, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  
+  # Add missing years 2010–2025
+  complete(
+    year = 2010:2025,
+    fill = list(
+      count_dm_ge_4 = 0,
+      count_missed_payouts = 0
+    )
+  ) %>%
+  
+  pivot_longer(
+    cols = c(count_dm_ge_4, count_missed_payouts),
+    names_to = "metric",
+    values_to = "count"
+  )
+
+# 6. Plot two lines
+ggplot(summary_counts, aes(x = year, y = count, color = metric)) +
+  geom_line(size = 1.2) +
+  geom_point() +
+  scale_color_manual(
+    values = c(count_dm_ge_4 = "steelblue", count_missed_payouts = "firebrick"),
+    labels = c("DM ≥ 4 observations", paste0("Missed payouts (RI ≥ ", ri_threshold, " & DM ≥ 4)") )
+  ) +
+  labs(
+    x = "Year",
+    y = "Count of observations",
+    color = "Metric",
+    title = "Counts by Year of Drought Severity and Missed Payouts"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+## heatmap, DM ≥3
+
+```{r}
+
+# Filter for DM >= 3 only
+filtered <- joined %>% filter(!is.na(dm_value), dm_value >= 3)
+
+# Summarize counts by year × interval
+heatmap_data <- filtered %>%
+  group_by(year, interval) %>%
+  summarise(
+    count_dm_ge_3 = n(),
+    count_missed_payouts = sum(cpc_value >= ri_threshold, na.rm = TRUE),
+    pct_missed_payouts = 100 * count_missed_payouts / count_dm_ge_3,
+    .groups = "drop"
+  )
+
+interval_start_months <- 1:11
+names(interval_start_months) <- 625:635
+interval_end_months <- 2:12
+names(interval_end_months) <- 625:635
+
+interval_labels <- tibble(
+  interval = 625:635,
+  label = paste0(
+    month.abb[interval_start_months[as.character(625:635)]], 
+    "-", 
+    month.abb[interval_end_months[as.character(625:635)]]
+  )
+)
+
+heatmap_data <- heatmap_data %>%
+  left_join(interval_labels, by = "interval") %>%
+  mutate(label = factor(label, levels = interval_labels$label))
+
+ggplot(heatmap_data, aes(x = label, y = factor(year), fill = count_missed_payouts)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(name = "Count Missed Payouts", option = "C", direction = -1) +
+  labs(
+    x = "Interval",
+    y = "Year",
+    title = paste0("Heatmap of Missed Payout Counts (DM ≥ 3 & RI ≥ ", ri_threshold, ")")
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+ggplot(heatmap_data, aes(x = label, y = factor(year), fill = pct_missed_payouts)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(name = "% Missed Payouts", option = "C", direction = -1) +
+  labs(
+    x = "Interval",
+    y = "Year",
+    title = paste0("Heatmap of % Missed Payouts (DM ≥ 3 & RI ≥ ", ri_threshold, ")")
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+
+
+```
+## export DM = 4 counts
+
+```{r}
+
+joined$missed_payout <- (joined$dm_value == 4 & joined$cpc_value >= ri_threshold)
+
+grids_missed_payouts <- joined %>%
+  group_by(GRIDCODE, year) %>%
+  summarise(
+    count_4 = sum(dm_value == 4, na.rm = TRUE),
+    count_4_and_true = sum(dm_value == 4 & missed_payout == TRUE, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+grids_missed_payouts$missed_payout_count <- grids_missed_payouts$count_4_and_true/25
+
+grids_missed_payouts <- grids_missed_payouts %>%
+  mutate(
+    missed_payout_pct = ifelse(count_4 == 0, 0, 100*(count_4_and_true/count_4))
+  )
+
+save(grids_missed_payouts, file = here("data/grids_missed_payouts_dm4.rda"))
+
+```
+
+
+
+## heatmap, DM ≥ 4
+
+```{r}
+
+# Filter for DM >= 4 only
+filtered <- joined %>% filter(!is.na(dm_value), dm_value >= 4)
+
+# Summarize counts by year × interval
+heatmap_data <- filtered %>%
+  group_by(year, interval) %>%
+  summarise(
+    count_dm_ge_4 = n(),
+    count_missed_payouts = sum(cpc_value >= ri_threshold, na.rm = TRUE),
+    pct_missed_payouts = 100 * count_missed_payouts / count_dm_ge_4,
+    .groups = "drop"
+  )
+
+interval_start_months <- 1:11
+names(interval_start_months) <- 625:635
+interval_end_months <- 2:12
+names(interval_end_months) <- 625:635
+
+interval_labels <- tibble(
+  interval = 625:635,
+  label = paste0(
+    month.abb[interval_start_months[as.character(625:635)]], 
+    "-", 
+    month.abb[interval_end_months[as.character(625:635)]]
+  )
+)
+
+
+## complete missing values
+heatmap_data <- heatmap_data %>% 
+  # Add missing years 2010–2025
+  complete(
+    year = 2010:2025,
+    interval = 625:635,
+    fill = list(
+      count_missed_payouts = NA,
+      pct_missed_payouts = NA
+    ))
+
+## add labels
+heatmap_data <- heatmap_data %>%
+  left_join(interval_labels, by = "interval") %>%
+  mutate(label = factor(label, levels = interval_labels$label))
+
+
+
+ggplot(heatmap_data, aes(x = label, y = factor(year), fill = count_missed_payouts)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(name = "Count Missed Payouts", option = "C", direction = -1, na.value = "white") +
+  labs(
+    x = "Interval",
+    y = "Year",
+    title = paste0("Heatmap of Missed Payout Counts (DM ≥ 4 & RI ≥ ", ri_threshold, ")")
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+ggplot(heatmap_data, aes(x = label, y = factor(year), fill = pct_missed_payouts)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(name = "% Missed Payouts", option = "C", direction = -1, na.value = "white") +
+  labs(
+    x = "Interval",
+    y = "Year",
+    title = paste0("Heatmap of % Missed Payouts (DM ≥ 4 & RI ≥ ", ri_threshold, ")")
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+
+
+```
+
+## maps
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(sf)
+library(ggplot2)
+library(viridis)
+
+# Assume grids is an sf object with geometry and lots of DM_median_ & cpc_index_ columns
+
+# Get row ID for spatial join (row number)
+grids <- grids %>% mutate(row_id = row_number())
+
+# DM_median long format
+dm_long <- grids %>%
+  st_drop_geometry() %>%
+  select(row_id, starts_with("DM_median_")) %>%
+  pivot_longer(
+    cols = -row_id,
+    names_to = "var",
+    values_to = "dm_value"
+  ) %>%
+  mutate(
+    var = str_remove(var, "DM_median_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  )
+
+# cpc_index long format
+cpc_long <- grids %>%
+  st_drop_geometry() %>%
+  select(row_id, starts_with("cpc_index_")) %>%
+  pivot_longer(
+    cols = -row_id,
+    names_to = "var",
+    values_to = "ri_value"
+  ) %>%
+  mutate(
+    var = str_remove(var, "cpc_index_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  )
+
+# Join DM and RI by row_id, year, interval
+joined <- left_join(dm_long, cpc_long, by = c("row_id", "year", "interval"))
+
+# Filter where DM >= 3
+filtered <- joined %>%
+  filter(!is.na(dm_value), dm_value >= 3)
+
+# Define missed payout = RI >= ri_threshold
+filtered <- filtered %>%
+  mutate(missed_payout = ri_value >= ri_threshold)
+
+# Aggregate per spatial cell (row_id)
+agg <- filtered %>%
+  group_by(row_id) %>%
+  summarise(
+    missed_payout_count = sum(missed_payout, na.rm = TRUE),
+    total_dm_ge_3 = n(),
+    missed_payout_pct = 100 * missed_payout_count / total_dm_ge_3
+  )
+
+# Join back to grids sf object
+grids_map <- grids %>%
+  left_join(agg, by = "row_id")
+
+# Map 1: Missed payout counts
+ggplot(grids_map) +
+  geom_sf(aes(fill = missed_payout_count), color = NA) +
+  scale_fill_viridis_c(option = "C", na.value = "grey90", direction = -1) +
+  labs(fill = "Missed Payout Count", title = "Count of Missed Payouts per Cell") +
+#  zlim(0,100) +
+  theme_minimal()
+
+# Map 2: Missed payout percentage
+ggplot(grids_map) +
+  geom_sf(aes(fill = missed_payout_pct), color = NA) +
+  scale_fill_viridis_c(option = "C", na.value = "grey90", direction = -1) +
+  labs(fill = "% Missed Payouts", title = "Percent of Missed Payouts per Cell") +
+  theme_minimal()
+
+
+
+```
+
+
+## comparison
+
+
+```{r}
+
+a <- st_read("/Users/mjcecil/Documents/GitHub/usdm-prf/data/USDM_GIS/2022_USDM_M/USDM_20220802.shp")
+a <- st_make_valid(a)
+tx_counties <- st_read(here("data/Tx_CntyBndry_Jurisdictional_TIGER/Tx_CntyBndry_Jurisdictional_TIGER.shp"))
+
+
+# 2. Ensure both are in the same CRS
+a <- st_transform(a, st_crs(tx_counties))
+
+# 3. Clip drought data to TX counties
+a_tx <- st_intersection(a, tx_counties)
+
+# 4. Identify counties not intersecting any drought zone
+# First, union drought geometries
+a_union <- st_union(a)
+
+# Find areas in TX counties not covered by drought
+no_drought_geom <- st_difference(tx_counties, a_union)
+
+# Add DM = -1 to those
+no_drought_sf <- no_drought_geom %>%
+  mutate(DM = -1)
+
+# 5. Combine drought data with the -1 zones
+a_tx_cleaned <- a_tx %>%
+  select(DM) %>%
+  mutate(DM = as.numeric(as.character(DM)))  # ensure numeric
+
+combined <- bind_rows(a_tx_cleaned, no_drought_sf)
+
+# 6. Plot with custom colors
+ggplot(combined) +
+  geom_sf(aes(fill = factor(DM)), color = NA) +
+  scale_fill_manual(
+    values = c(
+      "-1" = "darkgreen",
+      "0"  = "lightgreen",
+      "1"  = "yellow",
+      "2"  = "orange",
+      "3"  = "red",
+      "4"  = "darkred"
+    ),
+    name = "Drought Level",
+    labels = c(
+      "-1" = "No Classification",
+      "0" = "D0",
+      "1" = "D1",
+      "2" = "D2",
+      "3" = "D3",
+      "4" = "D4"
+    )
+  ) +
+  theme_minimal() +
+  labs(title = "USDM Aug 2, 2022") + 
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank())
+
+
+
+plot(a)
+
+grids_pt <- grids %>% st_drop_geometry() %>% st_as_sf(., coords = c("lon", "lat"), crs = 4326)
+
+grids_joined <- st_join(grids_pt, a, left = TRUE) %>%
+  mutate(DM = coalesce(DM, -1))
+
+grids_joined$DM[is.na(grids_joined$DM)] <- -1
+
+plot(grids_joined['DM'])
+
+rm(a)
+
+```
+
+```{r}
+
+ggplot(grids) +
+  geom_sf(aes(fill = factor(DM_median_2022_631)), color = NA) +
+  scale_fill_manual(
+    values = c(
+      "-1" = "darkgreen",
+      "0"  = "lightgreen",
+      "1"  = "yellow",
+      "2"  = "orange",
+      "3"  = "red",
+      "4"  = "darkred"
+    ),
+    name = NULL,  # Removes legend title
+    labels = c(
+      "-1" = "No Classification",
+      "0" = "D0",
+      "1" = "D1",
+      "2" = "D2",
+      "3" = "D3",
+      "4" = "D4"
+    )
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  labs(title = "Max USDM July-August 2022")
+
+```
+
+```{r}
+
+# 1. Recode values
+grids <- grids %>%
+  mutate(DM_class = ifelse(DM_median_2022_631 == 4, "D4", "Other"))
+
+# 2. Plot with two classes
+ggplot(grids) +
+  geom_sf(aes(fill = DM_class), color = NA) +
+  scale_fill_manual(
+    values = c(
+      "D4" = "darkred",
+      "Other" = "grey"
+    ),
+    name = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  labs(title = "Max USDM July–August 2022")
+
+```
+
+## table counts for DM prevalence
+
+```{r}
+
+# Define year and interval ranges
+years <- start_year:end_year
+intervals <- 625:635
+
+# Generate column names of interest
+target_cols <- outer(years, intervals, function(y, i) paste0("DM_median_", y, "_", i)) |> as.vector()
+
+# Filter columns that actually exist
+target_cols <- target_cols[target_cols %in% names(grids_collapsed)]
+
+# Extract and convert to matrix
+dm_matrix <- grids_collapsed[, target_cols]
+if ("sf" %in% class(grids_collapsed)) dm_matrix <- st_drop_geometry(dm_matrix)
+dm_matrix <- as.matrix(dm_matrix)
+dm_matrix <- apply(dm_matrix, 2, as.numeric)  # ensure numeric
+
+# Calculate percent of all values >= each threshold
+thresholds <- 0:4
+percent_ge <- sapply(thresholds, function(t) mean(dm_matrix >= t, na.rm = TRUE) * 100)
+
+# Create and print results table
+result_df <- data.frame(
+  Threshold = thresholds,
+  Percent_GE = round(percent_ge, 1)
+)
+
+print(result_df)
+
+
+
+```
+
+## table counts for RI prevalence
+
+```{r}
+
+# Define year and interval ranges
+years <- start_year:end_year
+intervals <- 625:635
+
+# Generate column names of interest
+target_cols <- outer(years, intervals, function(y, i) paste0("cpc_index_", y, "_", i)) |> as.vector()
+
+# Filter columns that actually exist
+target_cols <- target_cols[target_cols %in% names(grids_collapsed)]
+
+# Extract and convert to matrix
+dm_matrix <- grids_collapsed[, target_cols]
+if ("sf" %in% class(grids_collapsed)) dm_matrix <- st_drop_geometry(dm_matrix)
+dm_matrix <- as.matrix(dm_matrix)
+dm_matrix <- apply(dm_matrix, 2, as.numeric)  # ensure numeric
+
+# Calculate percent of all values >= each threshold
+thresholds <- seq(0.70, 0.90, 0.05)
+percent_le <- sapply(thresholds, function(t) mean(dm_matrix <= t, na.rm = TRUE) * 100)
+
+# Create and print results table
+result_df <- data.frame(
+  Threshold = thresholds,
+  Percent_GE = round(percent_le, 1)
+)
+
+print(result_df)
+
+
+
+```

@@ -1,0 +1,443 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-06-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load required libraries
+
+```{r}
+
+library(dplyr) 
+library(here)
+library(sf)
+library(raster)
+library(conflicted)
+library(rlang)
+library(scico)
+library(ggpubr)
+library(assertthat)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(gt)
+library(purrr)
+
+
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+options(max.print = 10000)
+```
+
+
+
+## initial plots
+
+## summary stats
+###mean RI by year
+
+```{r}
+load(here("data/outputs/grids_usdm_stats.rda"))
+
+grids <- grids %>% filter(!is.na(cpc_index_2010_625)) %>% filter(!(is.na(DM_max_2010_625)))
+
+ri_threshold <- 0.9
+high_drought_threshold <- 4
+high_drought_label <-"D4"
+
+start_year <- 2010
+end_year <- 2025
+
+aoi_states <- c("CA", "NV", "AZ", "NM", "CO", "UT", "TX", "OK", "KS")
+
+interval_start_months <- 1:11
+names(interval_start_months) <- 625:635
+
+interval_end_months <- 2:12
+names(interval_end_months) <- 625:635
+
+```
+
+## function for exporting tables
+
+```{r}
+
+export_df_to_latex <- function(df, file_path, caption = NULL) {
+  
+  #-----------------------------
+  # Helper: escape LaTeX specials
+  #-----------------------------
+  escape_latex <- function(x) {
+    x <- gsub("\\\\", "\\\\textbackslash{}", x)
+    x <- gsub("([%&_#\\$])", "\\\\\\1", x)
+    x <- gsub("_", "\\\\_", x)
+    return(x)
+  }
+  
+  # Convert to character
+  df[] <- lapply(df, as.character)
+  
+  # Escape LaTeX characters
+  df[] <- lapply(df, escape_latex)
+  colnames(df) <- escape_latex(colnames(df))
+  
+  # Alignment: first left, rest right
+  n_cols <- ncol(df)
+  align_string <- paste0("l", paste(rep("r", n_cols - 1), collapse = ""))
+  
+  # Build body rows
+  body_rows <- apply(df, 1, function(row) {
+    paste(row, collapse = " & ")
+  })
+  
+  body_rows <- paste0(body_rows, " \\\\")
+  body_text <- paste(body_rows, collapse = "\n")
+  
+  # Header row
+  header <- paste(colnames(df), collapse = " & ")
+  header <- paste0(header, " \\\\")
+  
+  # Caption + label handling
+  file_name <- tools::file_path_sans_ext(basename(file_path))
+  
+  if (is.null(caption)) {
+    caption_text <- gsub("_", " ", file_name)
+  } else {
+    caption_text <- caption
+  }
+  
+  label <- paste0("tab:", file_name)
+  
+  # Build LaTeX table
+  latex_table <- paste0(
+"\\begin{table}[t]
+\\centering
+\\fontsize{12pt}{14pt}\\selectfont
+\\begin{tabular}{@{\\extracolsep{\\fill}}", align_string, "}
+\\toprule
+", header, "
+\\midrule\\addlinespace[2.5pt]
+", body_text, "
+\\bottomrule
+\\end{tabular}
+\\caption{", caption_text, "}
+\\label{", label, "}
+\\end{table}"
+  )
+  
+  # Write file
+  writeLines(latex_table, file_path)
+  
+  message("LaTeX table exported to: ", file_path)
+}
+
+
+
+```
+
+
+## SOB enrollment
+
+```{r}
+
+### plot for policies by state
+
+state_policy_enrollment <- lapply(2010:2025, function(year){
+  print(year)
+  data_w_names <- read.csv(here("data/PRF_sob/sobcov_2024_names.csv"))
+  column_names <- colnames(data_w_names)
+  
+  year_2 <- substr(as.character(year), 3, 4)
+  data <- read.csv(here(paste0("data/PRF_sob/raw_files/sobcov", year_2, ".txt")),
+                   sep = '|')
+  names(data) <- column_names
+  
+  data_prf <- data %>%
+    filter(Commodity.Code ==  88) %>% 
+    filter(Insurance.Plan.Code == 13)
+  
+  print(unique(data_prf$Quantity.Type))
+  
+  state_sums <- data_prf %>%
+    group_by(Location.State.Abbreviation) %>%
+    summarize(total = sum(Policies.Sold.Count, na.rm = TRUE),
+              total_acres = sum(Net.Reported.Quantity, na.rm = TRUE))
+  
+  state_sums$year <- year
+  
+  return(state_sums)
+  
+}) %>% do.call("rbind", .)
+
+
+all_states <- unique(state_policy_enrollment$Location.State.Abbreviation)
+years <- 2010:2025
+
+# Expand the data to ensure every state-year combination is present
+state_policy_enrollment <- state_policy_enrollment %>%
+  complete(Location.State.Abbreviation = all_states, year = years, fill = list(total = 0))
+
+state_policy_enrollment <- state_policy_enrollment %>% rename(State = Location.State.Abbreviation,
+                                                              Policies = total)
+
+state_policy_enrollment[["year"]] <- as.Date(paste0(state_policy_enrollment[["year"]], "-01-01"))
+```
+
+```{r}
+
+
+state_policy_sum <- state_policy_enrollment %>%
+  group_by(State) %>%
+  summarise(total_policies = sum(Policies, na.rm = TRUE))
+
+state_acres_sum <- state_policy_enrollment %>%
+  group_by(State) %>%
+  summarise(total_acres = sum(total_acres, na.rm = TRUE))
+
+
+```
+
+```{r}
+
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(tigris)
+
+options(tigris_use_cache = TRUE)
+
+#-----------------------------
+# 1. Get CONUS States
+#-----------------------------
+states_conus <- states(cb = TRUE, resolution = "20m") %>%
+  filter(!STUSPS %in% c("AK", "HI", "PR")) %>%
+  st_transform(4326)  # WGS84
+
+#-----------------------------
+# 2. Ensure all states are represented
+#-----------------------------
+states_map <- states_conus %>%
+  left_join(
+    state_acres_sum,
+    by = c("STUSPS" = "State")
+  ) %>%
+  mutate(
+    total_acres = ifelse(is.na(total_acres), 0, total_acres)
+  )
+
+#-----------------------------
+# 3. Create Acreage Bins
+#-----------------------------
+# Adjusted bins: 0 = white, 1-1M, 1M-10M, etc.
+breaks <- c(0, 1, 1e6, 1e7, 5e7, 1e8, Inf)
+labels <- c(
+  "0",
+  "1 – 1M",
+  "1M – 10M",
+  "10M – 50M",
+  "50M – 100M",
+  "100M+"
+)
+
+states_map <- states_map %>%
+  mutate(
+    acres_bin = cut(
+      total_acres,
+      breaks = breaks,
+      labels = labels,
+      include.lowest = TRUE,
+      right = FALSE
+    )
+  )
+
+#-----------------------------
+# 4. Plot Map
+#-----------------------------
+p_prf_acres <- ggplot() +
+  geom_sf(data = states_map, aes(fill = acres_bin), color = "white", linewidth = 0.2) +
+  scale_fill_viridis_d(
+    name = "Total PRF Acres\n(2010–2025)",
+    option = "C",
+    direction = -1,
+    na.value = "white"
+  ) +
+  labs(
+    title = "Total PRF Enrollment Acres by State",
+    subtitle = "2010–2025",
+    caption = "Source: RMA PRF Program"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background  = element_rect(fill = "white", color = NA),
+    legend.position = "right"
+  )
+
+p_prf_acres
+
+png(here("data/outputs/figures/p_prf_acres.png"),
+    width = 1000,
+    height = 600)
+plot(p_prf_acres)
+dev.off()
+
+
+```
+
+## USDM D4 map
+
+```{r}
+
+
+options(tigris_use_cache = TRUE)  # cache shapefiles locally
+
+#-----------------------------
+# 1. Read RMA Grid
+#-----------------------------
+grid <- st_read(here("data/rainfall_index_grids/official_RMA_RI_grid.shp"), quiet = TRUE) %>%
+  st_make_valid() %>%
+  mutate(grid_id = row_number())
+
+#-----------------------------
+# 2. Read USDM Files
+#-----------------------------
+usdm_files <- list.files(
+  here("data/USDM_GIS"),
+  pattern = "\\.shp$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+
+# Extract YYYY from filename
+file_years <- str_extract(basename(usdm_files), "^USDM_(\\d{4})") %>%
+  str_remove("USDM_") %>%
+  as.numeric()
+
+# Keep only 2010–2025
+usdm_files <- usdm_files[file_years >= 2010 & file_years <= 2025]
+
+length(usdm_files)  # sanity check
+
+# Get CRS from first USDM file
+usdm_crs <- st_crs(st_read(usdm_files[1], quiet = TRUE))
+grid <- st_transform(grid, usdm_crs)
+
+#-----------------------------
+# 3. Function to Calculate D4 Indicator Per Week
+#-----------------------------
+process_week <- function(file) {
+  print(file)
+  usdm <- st_read(file, quiet = TRUE) %>%
+    st_make_valid()
+  
+  # Keep only D4 polygons
+  usdm_d4 <- usdm %>%
+    filter(DM == "4")   # change if your column name differs
+  
+  # If no D4 this week
+  if (nrow(usdm_d4) == 0) {
+    return(data.frame(
+      grid_id = grid$grid_id,
+      D4_week = 0
+    ))
+  }
+  
+  # Intersection test
+  intersects <- st_intersects(grid, usdm_d4, sparse = FALSE)
+  
+  data.frame(
+    grid_id = grid$grid_id,
+    D4_week = as.integer(rowSums(intersects) > 0)
+  )
+}
+
+#-----------------------------
+# 4. Apply Across All Weeks
+#-----------------------------
+d4_results <- map_dfr(usdm_files, process_week)
+
+#-----------------------------
+# 5. Calculate Percent of Time in D4
+#-----------------------------
+d4_summary <- d4_results %>%
+  group_by(grid_id) %>%
+  summarise(
+    D4_percent = mean(D4_week) * 100,
+    .groups = "drop"
+  )
+
+# Join back to spatial grid
+grid <- grid %>%
+  left_join(d4_summary, by = "grid_id")
+
+#-----------------------------
+# 7. CONUS States (tigris)
+#-----------------------------
+states <- states(cb = TRUE, resolution = "20m") %>%  # generalized = faster
+  filter(!STUSPS %in% c("AK", "HI", "PR")) %>%
+  st_transform(st_crs(grid))
+#-----------------------------
+# 7. Plot
+#-----------------------------
+
+#-----------------------------
+# Create CONUS mask
+#-----------------------------
+conus_states <- states(cb = TRUE, resolution = "20m") %>%
+  filter(!STUSPS %in% c("AK", "HI", "PR")) %>%
+  st_transform(st_crs(grid))
+
+conus_union <- st_union(conus_states)
+
+# Clip grid to CONUS boundary
+sf::sf_use_s2(FALSE)
+
+grid <- st_intersection(grid, conus_union)
+
+p_usdm <- ggplot() +
+  geom_sf(data = grid, aes(fill = D4_percent), color = NA) +
+  geom_sf(data = states, fill = NA, color = "black", linewidth = 0.3) +
+  scale_fill_viridis_c(
+    name = "% Time in D4",
+    option = "C",
+    direction = -1,
+    na.value = "white"
+  ) +
+  labs(
+    title = "Percent of Time in Exceptional Drought (D4)",
+    subtitle = "USDM Weekly Reports (2010–2025)",
+    caption = "Source: U.S. Drought Monitor"
+  ) +
+  theme_minimal()
+
+p_usdm
+
+
+
+
+
+```
+
+```{r}
+
+library(patchwork)
+
+png(here("data/outputs/figures/p_usdm_prf.png"),
+    width = 1400,   # doubled width
+    height = 600,
+    res = 150)
+
+p_prf_acres + p_usdm   # side-by-side
+
+dev.off()
+
+
+
+```
+
+

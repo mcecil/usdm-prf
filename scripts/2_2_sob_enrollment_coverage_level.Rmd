@@ -1,0 +1,726 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-06-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load required libraries
+
+```{r}
+
+library(dplyr) 
+library(here)
+library(sf)
+library(raster)
+library(conflicted)
+library(rlang)
+library(scico)
+library(ggpubr)
+library(assertthat)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(gt)
+
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+options(max.print = 10000)
+```
+
+
+
+## initial plots
+
+## summary stats
+###mean RI by year
+
+```{r}
+load(here("data/outputs/grids_usdm_stats.rda"))
+
+grids <- grids %>% filter(!is.na(cpc_index_2010_625)) %>% filter(!(is.na(DM_max_2010_625)))
+
+aoi_states <- unique(grids$STATE)
+  
+ri_threshold <- 0.9
+high_drought_threshold <- 4
+high_drought_label <-"D4"
+
+start_year <- 2007
+end_year <- 2025
+
+aoi_states <- c("CA", "NV", "AZ", "NM", "CO", "UT", "TX", "OK", "KS")
+
+interval_start_months <- 1:11
+names(interval_start_months) <- 625:635
+
+interval_end_months <- 2:12
+names(interval_end_months) <- 625:635
+
+```
+
+## function for exporting tables
+
+```{r}
+
+export_df_to_latex <- function(df, file_path, caption = NULL) {
+  
+  #-----------------------------
+  # Helper: escape LaTeX specials
+  #-----------------------------
+  escape_latex <- function(x) {
+    x <- gsub("\\\\", "\\\\textbackslash{}", x)
+    x <- gsub("([%&_#\\$])", "\\\\\\1", x)
+    x <- gsub("_", "\\\\_", x)
+    return(x)
+  }
+  
+  # Convert to character
+  df[] <- lapply(df, as.character)
+  
+  # Escape LaTeX characters
+  df[] <- lapply(df, escape_latex)
+  colnames(df) <- escape_latex(colnames(df))
+  
+  # Alignment: first left, rest right
+  n_cols <- ncol(df)
+  align_string <- paste0("l", paste(rep("r", n_cols - 1), collapse = ""))
+  
+  # Build body rows
+  body_rows <- apply(df, 1, function(row) {
+    paste(row, collapse = " & ")
+  })
+  
+  body_rows <- paste0(body_rows, " \\\\")
+  body_text <- paste(body_rows, collapse = "\n")
+  
+  # Header row
+  header <- paste(colnames(df), collapse = " & ")
+  header <- paste0(header, " \\\\")
+  
+  # Caption + label handling
+  file_name <- tools::file_path_sans_ext(basename(file_path))
+  
+  if (is.null(caption)) {
+    caption_text <- gsub("_", " ", file_name)
+  } else {
+    caption_text <- caption
+  }
+  
+  label <- paste0("tab:", file_name)
+  
+  # Build LaTeX table
+  latex_table <- paste0(
+"\\begin{table}[t]
+\\centering
+\\fontsize{12pt}{14pt}\\selectfont
+\\begin{tabular}{@{\\extracolsep{\\fill}}", align_string, "}
+\\toprule
+", header, "
+\\midrule\\addlinespace[2.5pt]
+", body_text, "
+\\bottomrule
+\\end{tabular}
+\\caption{", caption_text, "}
+\\label{", label, "}
+\\end{table}"
+  )
+  
+  # Write file
+  writeLines(latex_table, file_path)
+  
+  message("LaTeX table exported to: ", file_path)
+}
+
+
+
+```
+
+
+## SOB enrollment by year - policies
+
+
+```{r}
+
+### plot for policies by state
+
+state_policy_enrollment <- lapply(start_year:end_year, function(year){
+  print(year)
+  data_w_names <- read.csv(here("data/PRF_sob/sobcov_2024_names.csv"))
+  column_names <- colnames(data_w_names)
+  
+  year_2 <- substr(as.character(year), 3, 4)
+  data <- read.csv(here(paste0("data/PRF_sob/raw_files/sobcov", year_2, ".txt")),
+                   sep = '|')
+  names(data) <- column_names
+  
+  data_prf <- data %>%
+    filter(Commodity.Code ==  88) %>% 
+    filter(Insurance.Plan.Code == 13)
+  
+  print(unique(data_prf$Quantity.Type))
+  
+  state_sums <- data_prf %>%
+    group_by(Location.State.Abbreviation) %>%
+    summarize(total = sum(Policies.Sold.Count, na.rm = TRUE),
+              total_acres = sum(Net.Reported.Quantity, na.rm = TRUE))
+  
+  state_sums$year <- year
+  
+  return(state_sums)
+  
+}) %>% do.call("rbind", .)
+
+
+all_states <- unique(state_policy_enrollment$Location.State.Abbreviation)
+years <- 2010:2025
+
+# Expand the data to ensure every state-year combination is present
+state_policy_enrollment <- state_policy_enrollment %>%
+  complete(Location.State.Abbreviation = all_states, year = years, fill = list(total = 0))
+
+state_policy_enrollment <- state_policy_enrollment %>% rename(State = Location.State.Abbreviation,
+                                                              Policies = total)
+
+state_policy_enrollment[["year"]] <- as.Date(paste0(state_policy_enrollment[["year"]], "-01-01"))
+
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+
+#---------------------------
+# Label dataset
+#---------------------------
+label_states <- aoi_states
+
+state_labels <- state_policy_enrollment %>%
+  filter(State %in% label_states) %>%
+  group_by(State) %>%
+  filter(year == max(year)) %>%
+  ungroup()
+
+#---------------------------
+# Plot
+#---------------------------
+p <- ggplot(state_policy_enrollment,
+            aes(x = year,
+                y = Policies/1000,
+                group = State)) +
+
+  # Lines for all states except Texas
+  geom_line(data = filter(state_policy_enrollment, State != "TX"),
+            aes(color = "Other"),
+            linewidth = 1,
+            alpha = 0.5) +
+
+  # Texas line
+  geom_line(data = filter(state_policy_enrollment, State == "TX"),
+            aes(color = "TX"),
+            linewidth = 1.2) +
+
+  #---------------------------
+  # Non-overlapping labels
+  #---------------------------
+  geom_text_repel(
+    data = state_labels,
+    aes(label = State),
+    size = 5,
+    color = "black",
+    direction = "y",          # repel vertically (best for time series)
+    hjust = 0,
+    nudge_x = 0.3,            # push labels right of endpoints
+    segment.color = "grey40",
+    segment.size = 0.4,
+    box.padding = 0.3,
+    point.padding = 0.2,
+    max.overlaps = Inf
+  ) +
+
+  # Colors
+  scale_color_manual(values = c("TX" = "black",
+                                "Other" = "grey")) +
+
+  # Labels
+  labs(
+    x = "Data Source: USDA State-County-Crop Summary of Business",
+    y = "Policies (k)",
+    color = "State"
+  ) +
+
+  # X scale
+  scale_x_date(
+    breaks = seq(min(state_policy_enrollment$year),
+                 max(state_policy_enrollment$year),
+                 by = "2 years"),
+    date_labels = "%Y",
+    expand = c(0.05, 0)
+  ) +
+
+  # Prevent clipping of repelled labels
+  coord_cartesian(clip = "off") +
+
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.title = element_text(size = 14),
+    axis.text  = element_text(size = 14),
+    plot.title = element_text(size = 14),
+    axis.title.x = element_text(hjust = 0.02, vjust = 0.2),
+    plot.margin = margin(5.5, 40, 5.5, 5.5)  # room for labels
+  )
+
+p
+
+
+
+
+```
+
+## SOB enrollment by year - acres
+
+```{r}
+
+#---------------------------
+# Plot for ACRES by state
+#---------------------------
+label_states <- aoi_states
+
+state_labels <- state_policy_enrollment %>%
+  filter(State %in% label_states) %>%
+  group_by(State) %>%
+  filter(year == max(year)) %>%
+  ungroup()
+
+p_acres <- ggplot(state_policy_enrollment,
+                  aes(x = year,
+                      y = total_acres / 1e6,
+                      group = State)) +
+  geom_line(data = filter(state_policy_enrollment, State != "TX"),
+            aes(color = "Other"),
+            linewidth = 1,
+            alpha = 0.5) +
+  geom_line(data = filter(state_policy_enrollment, State == "TX"),
+            aes(color = "TX"),
+            linewidth = 1.2) +
+  geom_text_repel(
+    data = state_labels,
+    aes(label = State),
+    size = 5,
+    color = "black",
+    direction = "y",
+    hjust = 0,
+    nudge_x = 0.3,
+    segment.color = "grey40",
+    segment.size = 0.4,
+    box.padding = 0.3,
+    point.padding = 0.2,
+    max.overlaps = Inf
+  ) +
+  scale_color_manual(values = c("TX" = "black", "Other" = "grey")) +
+  labs(
+    x = "Data Source: USDA State-County-Crop Summary of Business",
+    y = "Acres (millions)",
+    color = "State"
+  ) +
+  scale_x_date(
+    breaks = seq(min(state_policy_enrollment$year),
+                 max(state_policy_enrollment$year),
+                 by = "2 years"),
+    date_labels = "%Y",
+    expand = c(0.05, 0)
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.title = element_text(size = 14),
+    axis.text  = element_text(size = 14),
+    plot.title = element_text(size = 14),
+    axis.title.x = element_text(hjust = 0.02, vjust = 0.2),
+    plot.margin = margin(5.5, 40, 5.5, 5.5)
+  )
+
+p_acres
+
+#---------------------------
+# Table: % of national acres by state, 2010-2025
+#---------------------------
+acre_table <- state_policy_enrollment %>%
+  mutate(year = as.integer(format(year, "%Y"))) %>%
+  filter(year %in% 2010:2025) %>%
+  group_by(year) %>%
+  mutate(national_total = sum(total_acres, na.rm = TRUE)) %>%
+  ungroup() %>%
+  group_by(State) %>%
+  summarise(
+    total_acres_all_years  = sum(total_acres, na.rm = TRUE),
+    national_total         = sum(national_total, na.rm = TRUE),  # sum of annual totals * n_years, so divide below
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_national  = total_acres_all_years / sum(total_acres_all_years) * 100,
+    in_aoi_region = State %in% aoi_states,
+    rank          = rank(-total_acres_all_years, ties.method = "min")
+  ) %>%
+  arrange(rank)
+
+# Region-level summary row
+region_row <- acre_table %>%
+  filter(in_aoi_region) %>%
+  summarise(
+    State                 = "9-State Region",
+    total_acres_all_years = sum(total_acres_all_years),
+    pct_national          = sum(pct_national),
+    in_aoi_region         = TRUE,
+    rank                  = NA_integer_
+  )
+
+rank_2025 <- state_policy_enrollment %>%
+  mutate(year = as.integer(format(year, "%Y"))) %>%
+  filter(year == 2025) %>%
+  mutate(rank_2025 = rank(-total_acres, ties.method = "min")) %>%
+  select(State, rank_2025)
+
+
+
+acre_table_final <- bind_rows(acre_table, region_row) %>%
+  select(State, rank, total_acres_all_years, pct_national, in_aoi_region)
+
+acre_table_final <- acre_table_final %>%
+  left_join(rank_2025, by = "State")
+
+print(acre_table_final)
+
+acre_table_aoi <- acre_table_final %>% filter(in_aoi_region == TRUE)
+print(acre_table_aoi)
+
+
+```
+
+```{r}
+#---------------------------
+# Plot for ACRES % change by state (AOI states only)
+#---------------------------
+
+# Calculate % change from previous year
+state_pct_change <- state_policy_enrollment %>%
+  filter(State %in% aoi_states) %>%
+  arrange(State, year) %>%
+  group_by(State) %>%
+  mutate(pct_change = (total_acres - lag(total_acres)) / lag(total_acres) * 100) %>%
+  filter(!is.na(pct_change)) %>%
+  ungroup()
+
+# Labels at last year
+state_labels_pct <- state_pct_change %>%
+  group_by(State) %>%
+  filter(year == max(year)) %>%
+  ungroup()
+
+p_acres_pct <- ggplot(state_pct_change,
+                      aes(x = year, y = pct_change, group = State)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50", linewidth = 0.5) +
+  geom_line(linewidth = 1, color = "black") +
+  geom_point(size = 1.5, color = "black") +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(
+    x = "Data Source: USDA State-County-Crop Summary of Business",
+    y = "Year-over-Year Change in Acres (%)",
+  ) +
+  scale_x_date(
+    breaks = seq(min(state_pct_change$year),
+                 max(state_pct_change$year),
+                 by = "4 years"),
+    date_labels = "%Y",
+    expand = c(0.05, 0)
+  ) +
+  coord_cartesian(clip = "off", ylim = c(NA, 1000)) +
+  facet_wrap(~ State, scales = "free_y") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.title = element_text(size = 12),
+    axis.text  = element_text(size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(size = 14),
+    axis.title.x = element_text(hjust = 0.02, vjust = 0.2),
+    strip.text = element_text(size = 13, face = "bold"),
+    plot.margin = margin(5.5, 10, 5.5, 5.5)
+  )
+
+p_acres_pct
+```
+
+
+
+```{r}
+state_policy_enrollment_aoi <- state_policy_enrollment %>% filter(Location.State.Abbreviation %in% aoi_states)
+
+
+```
+
+## Number of states enrolled by year
+```{r}
+# for (current_year in 2007:2025){
+#   print(current_year)
+#   print(state_policy_enrollment %>% filter(year == current_year) %>% pull(Location.State.Abbreviation) %>% unique() %>% length())
+# }
+```
+
+
+
+
+## acreage and liaability $ represented by PRF by year
+
+```{r}
+
+### plot for liability and acreage by year
+year_prf_enrollment <- lapply(start_year:end_year, function(year){
+  print(year)
+  data_w_names <- read.csv(here("data/PRF_sob/sobcov_2024_names.csv"))
+  column_names <- colnames(data_w_names)
+  
+  year_2 <- substr(as.character(year), 3, 4)
+  data <- read.csv(here(paste0("data/PRF_sob/raw_files/sobcov", year_2, ".txt")),
+                   sep = '|')
+  names(data) <- column_names
+  
+  data_prf <- data %>%
+    filter(Commodity.Code == 88) %>%
+    filter(Insurance.Plan.Code == 13)
+  
+  # Total liability (all PRF rows)
+  total_liability <- sum(data_prf[[grep("Liability.Amount", colnames(data_prf), value = TRUE)[1]]], na.rm = TRUE)
+  
+  # Total liability across ALL commodities for % calculation
+  total_liability_all <- sum(data[[grep("Liability.Amount", colnames(data), value = TRUE)[1]]], na.rm = TRUE)
+  
+  # Acreage: filter to Acres rows only (collapse whitespace)
+  data_prf_acres <- data_prf %>%
+    filter(trimws(Quantity.Type) == "Acres")
+  
+  total_acreage_prf <- sum(data_prf_acres$Net.Reported.Quantity, na.rm = TRUE)
+  
+  # Total acreage across ALL commodities
+  total_acreage_all <- data %>%
+    filter(trimws(Quantity.Type) == "Acres") %>%
+    pull(Net.Reported.Quantity) %>%
+    sum(na.rm = TRUE)
+  
+  data.frame(
+    year = year,
+    pct_liability = total_liability / total_liability_all,
+    pct_acreage   = total_acreage_prf / total_acreage_all
+  )
+  
+}) %>% do.call("rbind", .)
+
+year_prf_enrollment[["year"]] <- as.Date(paste0(year_prf_enrollment[["year"]], "-01-01"))
+
+```
+
+## Percent grazing by year
+
+```{r}
+
+prf_grazing_pct_by_year <- function(years,
+                                     states_filter = aoi_states) {
+  
+  results <- lapply(years, function(year) {
+    
+    year_2 <- substr(year, 3, 4)
+    tpu_names <- read.csv(here("data/PRF_tpu/tpu_names.csv"))
+    tpu <- read.csv(here(paste0("data/PRF_tpu/SOBSCCTPU", year_2, ".TXT")), sep = "|", header = F)
+    names(tpu) <- names(tpu_names)
+    
+    tpu$Type.Name <- trimws(tpu$Type.Name)
+    
+    # Normalize type names for older years
+    if (year <= 2012) {
+      tpu[tpu$Type.Name == "Grazingland", "Type.Name"] <- "Grazing"
+      tpu[tpu$Type.Name == "Hayland",     "Type.Name"] <- "Haying"
+      tpu[tpu$Type.Name == "GRAZINGLAND", "Type.Name"] <- "Grazing"
+      tpu[tpu$Type.Name == "HAYLAND",     "Type.Name"] <- "Haying"
+    }
+    
+    tpu$Commodity.Code <- as.numeric(tpu$Commodity.Code)
+    
+    # Apply same base filters as payment_calcs (excluding use_type filter)
+    tpu <- tpu %>%
+      filter(State.Abbreviation %in% states_filter) %>%
+      filter(Liability.Amount > 0) %>%
+      filter(Commodity.Code == 88) %>%
+      filter(Type.Name %in% c("Grazing", "Haying"))
+    
+    # Filter haying to non-organic non-irrigated, same as payment_calcs
+    haying_rows <- tpu$Type.Name == "Haying" & year >= 2011
+    if (any(haying_rows)) {
+      tpu <- tpu %>%
+        filter(Type.Name == "Grazing" | 
+               (Type.Name == "Haying" & Practice.Code %in% c(525:535, 625:635)))
+    }
+    
+    # Summarise acres by type
+    acres_by_type <- tpu %>%
+      group_by(Type.Name) %>%
+      summarise(total_acres = sum(Net.Reporting.Level.Amount, na.rm = TRUE), .groups = "drop")
+    
+    total_acres <- sum(acres_by_type$total_acres)
+    
+    acres_by_type <- acres_by_type %>%
+      mutate(
+        year         = year,
+        total_prf_acres = total_acres,
+        pct_of_total = total_acres / total_acres * 100  # placeholder; see below
+      )
+    
+    # Compute per-type percentage of total PRF acres
+    acres_by_type$pct_of_total <- acres_by_type$total_acres / total_acres * 100
+    
+    acres_by_type
+  })
+  
+  # Combine all years
+  combined <- bind_rows(results)
+  
+  # Pivot to a wide summary with one row per year
+  summary <- combined %>%
+    select(year, Type.Name, total_acres, pct_of_total) %>%
+    pivot_wider(
+      names_from  = Type.Name,
+      values_from = c(total_acres, pct_of_total),
+      values_fill = 0
+    ) %>%
+    rename(
+      grazing_acres     = total_acres_Grazing,
+      haying_acres      = total_acres_Haying,
+      grazing_pct       = pct_of_total_Grazing,
+      haying_pct        = pct_of_total_Haying
+    ) %>%
+    arrange(year)
+  
+  return(summary)
+}
+
+years <- 2007:2025
+prf_shares <- prf_grazing_pct_by_year(years)
+print(prf_shares)
+
+```
+
+
+## coverage level by year
+
+
+```{r}
+load(here("data/outputs/tpu_all_years.rda"))
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+#---------------------------
+# 1) States of interest
+#---------------------------
+states_keep <- aoi_states
+
+#---------------------------
+# 2) Filter + summarize acres
+#---------------------------
+acres_by_cov <- tpu_all_years %>%
+  filter(State.Abbreviation %in% aoi_states) %>%
+  group_by(year, Coverage.Level.Percent) %>%
+  summarise(
+    acres = sum(Net.Reporting.Level.Amount, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+#---------------------------
+# 3) Compute share of acres
+#---------------------------
+acres_share <- acres_by_cov %>%
+  group_by(year) %>%
+  mutate(
+    total_year_acres = sum(acres),
+    share = acres / total_year_acres
+  ) %>%
+  ungroup()
+
+#---------------------------
+# 4) Plot — Acres by coverage level
+#---------------------------
+p_acres <- ggplot(acres_by_cov,
+                  aes(x = year,
+                      y = acres,
+                      color = factor(Coverage.Level.Percent),
+                      group = Coverage.Level.Percent)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 2) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Insured Acres by Coverage Level",
+    subtitle = "Nine-State Region",
+    x = NULL,
+    y = "Acres",
+    color = "Coverage Level (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13),
+    plot.title = element_text(size = 14)
+  )
+
+#---------------------------
+# 5) Plot — Share of acres
+#---------------------------
+p_share <- ggplot(acres_share,
+                  aes(x = year,
+                      y = share,
+                      fill = factor(Coverage.Level.Percent))) +
+  geom_area(position = "stack", alpha = 0.9) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Share of Insured Acres by Coverage Level",
+    subtitle = "Nine-State Region",
+    x = NULL,
+    y = "Share of Acres",
+    fill = "Coverage Level (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13),
+    plot.title = element_text(size = 14)
+  )
+
+#---------------------------
+# 6) Print plots
+#---------------------------
+p_acres
+p_share
+
+png(here("data/outputs/figures/coverage_level_year.png"),
+    width = 800,
+    heigh = 600)
+plot(p_acres)
+dev.off()
+
+
+```
+
+## Coverage level acreage share all years
+
+```{r}
+
+acres_by_cov %>%
+  group_by(Coverage.Level.Percent) %>%
+  summarise(total = sum(acres, na.rm = TRUE)) %>% 
+  mutate(percent = 100*(total / sum(total)) )
+
+
+
+```
+

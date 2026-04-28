@@ -1,0 +1,1065 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-06-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load required libraries
+
+```{r}
+
+library(dplyr) 
+library(here)
+library(sf)
+library(raster)
+library(conflicted)
+library(rlang)
+library(scico)
+library(ggpubr)
+library(assertthat)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(gt)
+
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+options(max.print = 10000)
+```
+
+
+
+## initial plots
+
+## summary stats
+###mean RI by year
+
+```{r}
+load(here("data/outputs/grids_usdm_stats.rda"))
+
+grids <- grids %>% filter(!is.na(cpc_index_2010_625)) %>% filter(!(is.na(DM_median_2010_625)))
+
+ri_threshold <- 0.9
+high_drought_threshold <- 4
+high_drought_label <-"D4"
+
+start_year <- 2010
+end_year <- 2025
+
+aoi_states <- c("CA", "NV", "AZ", "NM", "CO", "UT", "TX", "OK", "KS")
+
+interval_start_months <- 1:11
+names(interval_start_months) <- 625:635
+
+interval_end_months <- 2:12
+names(interval_end_months) <- 625:635
+
+```
+
+## function for exporting tables
+
+```{r}
+
+export_df_to_latex <- function(df, file_path, caption = NULL) {
+  
+  #-----------------------------
+  # Helper: escape LaTeX specials
+  #-----------------------------
+  escape_latex <- function(x) {
+    x <- gsub("\\\\", "\\\\textbackslash{}", x)
+    x <- gsub("([%&_#\\$])", "\\\\\\1", x)
+    x <- gsub("_", "\\\\_", x)
+    return(x)
+  }
+  
+  # Convert to character
+  df[] <- lapply(df, as.character)
+  
+  # Escape LaTeX characters
+  df[] <- lapply(df, escape_latex)
+  colnames(df) <- escape_latex(colnames(df))
+  
+  # Alignment: first left, rest right
+  n_cols <- ncol(df)
+  align_string <- paste0("l", paste(rep("r", n_cols - 1), collapse = ""))
+  
+  # Build body rows
+  body_rows <- apply(df, 1, function(row) {
+    paste(row, collapse = " & ")
+  })
+  
+  body_rows <- paste0(body_rows, " \\\\")
+  body_text <- paste(body_rows, collapse = "\n")
+  
+  # Header row
+  header <- paste(colnames(df), collapse = " & ")
+  header <- paste0(header, " \\\\")
+  
+  # Caption + label handling
+  file_name <- tools::file_path_sans_ext(basename(file_path))
+  
+  if (is.null(caption)) {
+    caption_text <- gsub("_", " ", file_name)
+  } else {
+    caption_text <- caption
+  }
+  
+  label <- paste0("tab:", file_name)
+  
+  # Build LaTeX table
+  latex_table <- paste0(
+"\\begin{table}[t]
+\\centering
+\\fontsize{12pt}{14pt}\\selectfont
+\\begin{tabular}{@{\\extracolsep{\\fill}}", align_string, "}
+\\toprule
+", header, "
+\\midrule\\addlinespace[2.5pt]
+", body_text, "
+\\bottomrule
+\\end{tabular}
+\\caption{", caption_text, "}
+\\label{", label, "}
+\\end{table}"
+  )
+  
+  # Write file
+  writeLines(latex_table, file_path)
+  
+  message("LaTeX table exported to: ", file_path)
+}
+
+
+
+```
+
+
+
+
+
+## payouts by drought length
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(sf)
+
+conflicts_prefer(dplyr::lag)
+
+#====================================================
+# 1. Build long dataset (DM + RI aligned)
+#====================================================
+long_data <- grids %>%
+  st_drop_geometry() %>%
+  select(
+    GRIDCODE, STATE,
+    starts_with("DM_median_"),
+    starts_with("cpc_index_")
+  ) %>%
+  pivot_longer(
+    cols = -c(GRIDCODE, STATE),
+    names_to = "var",
+    values_to = "value"
+  ) %>%
+  mutate(
+    type = case_when(
+      str_detect(var, "^DM_median_") ~ "DM",
+      str_detect(var, "^cpc_index_") ~ "RI"
+    ),
+    var = str_remove(var, "^DM_median_|^cpc_index_"),
+    year = as.integer(str_sub(var, 1, 4)),
+    interval = as.integer(str_sub(var, 6))
+  ) %>%
+  select(-var) %>%
+  pivot_wider(names_from = type, values_from = value) %>%
+  arrange(GRIDCODE, year, interval)
+
+#====================================================
+# 2. Identify drought runs (DM = 4)
+#====================================================
+long_data <- long_data %>%
+  mutate(
+    drought = DM == 4,
+    payout  = RI <= 0.90
+  ) %>%
+  group_by(STATE, GRIDCODE) %>%
+  mutate(
+    drought_group = cumsum(drought != lag(drought, default = FALSE))
+  ) %>%
+  ungroup()
+
+#====================================================
+# 3. Compute drought run length
+#====================================================
+drought_lengths <- long_data %>%
+  filter(drought) %>%
+  group_by(STATE, GRIDCODE, drought_group) %>%
+  summarise(
+    run_length = n(),
+    STATE = first(STATE),
+    .groups = "drop"
+  )
+
+long_data <- long_data %>%
+  left_join(
+    drought_lengths,
+    by = c("GRIDCODE", "drought_group", "STATE")
+  )
+
+#====================================================
+# 4. Categorize drought length
+#====================================================
+long_data <- long_data %>%
+  mutate(
+    length_category = case_when(
+      is.na(run_length) ~ "No D4",
+      run_length >= 1 & run_length <= 5  ~ "Short (1-5)",
+      run_length >= 6 & run_length <= 10 ~ "Medium (6-10)",
+      run_length >= 11                   ~ "Long (11+)"
+    )
+  )
+
+#====================================================
+# 5. Calculate payout % (interval-weighted)
+#====================================================
+payout_summary <- long_data %>%
+  group_by(STATE, length_category) %>%
+  summarise(
+    total_intervals  = n(),
+    payout_intervals = sum(payout, na.rm = TRUE),
+    payout_pct       = payout_intervals / total_intervals * 100,
+    .groups = "drop"
+  )
+
+#====================================================
+# 6. Format final table
+#====================================================
+payout_table <- payout_summary %>%
+  select(STATE, length_category, payout_pct) %>%
+  pivot_wider(
+    names_from = length_category,
+    values_from = payout_pct
+  ) %>%
+  select(STATE, `Short (1-5)`, `Medium (6-10)`, `Long (11+)`, `No D4`)
+
+# TOTAL row (interval-weighted across all states)
+total_row <- long_data %>%
+  group_by(length_category) %>%
+  summarise(
+    payout_pct = sum(payout, na.rm = TRUE) / n() * 100,
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    names_from = length_category,
+    values_from = payout_pct
+  ) %>%
+  mutate(STATE = "TOTAL") %>%
+  select(STATE, `Short (1-5)`, `Medium (6-10)`, `Long (11+)`, `No D4`)
+
+payout_table <- bind_rows(payout_table, total_row)
+
+# Round and add %
+payout_table <- payout_table %>%
+  mutate(across(-STATE, ~ paste0(round(.x), "%")))
+
+payout_table
+
+export_df_to_latex(payout_table,
+                   file_path = here("data/outputs/tables/prf_payout_drought_length.tex"),
+                   caption = "PRF payout % by length of drought. Percents represent the frequency for grid-intervals to have payouts with RI <= 0.9, so longer droughts will have more grid-intervals.")
+
+```
+
+## distribution of drought length
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+
+#====================================================
+# 1. Compute drought run lengths
+#====================================================
+drought_runs <- long_data %>%
+  filter(drought) %>%
+  group_by(STATE, GRIDCODE, drought_group) %>%
+  summarise(run_length = n(), .groups = "drop")
+
+#====================================================
+# 2. Cap at 30, label 30+ as last category
+#====================================================
+cap <- 30
+
+drought_runs <- drought_runs %>%
+  mutate(run_length_capped = pmin(run_length, cap))
+
+total_droughts <- nrow(drought_runs)
+
+dist_data <- drought_runs %>%
+  group_by(run_length_capped) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  complete(run_length_capped = 1:cap, fill = list(n = 0)) %>%
+  arrange(run_length_capped) %>%
+  mutate(
+    pct     = 100 * n / total_droughts,
+    cum_pct = cumsum(pct),
+    label   = ifelse(run_length_capped == cap,
+                     paste0(cap, "+"),
+                     as.character(run_length_capped))
+  )
+
+#====================================================
+# Length-weighted versions
+#====================================================
+total_intervals <- sum(drought_runs$run_length)
+
+dist_data_wtd <- drought_runs %>%
+  # Complete BEFORE capping so all raw lengths are present
+  group_by(run_length) %>%
+  summarise(n = n(), total_len = sum(run_length), .groups = "drop") %>%
+  complete(run_length = 1:cap, fill = list(n = 0, total_len = 0)) %>%
+  # Now cap: lump everything >= cap into cap
+  mutate(run_length_capped = pmin(run_length, cap)) %>%
+  group_by(run_length_capped) %>%
+  summarise(n = sum(n), total_len = sum(total_len), .groups = "drop") %>%
+  arrange(run_length_capped) %>%
+  mutate(
+    pct     = 100 * total_len / total_intervals,
+    cum_pct = cumsum(pct),
+    label   = ifelse(run_length_capped == cap,
+                     paste0(cap, "+"),
+                     as.character(run_length_capped))
+  )
+
+#====================================================
+# 3. Percent occurrence plot
+#====================================================
+p_dist <- ggplot(dist_data,
+                 aes(x = run_length_capped, y = pct)) +
+  geom_line(linewidth = 1.0, color = "steelblue") +
+  geom_point(size = 2.5, color = "steelblue") +
+  scale_x_continuous(
+    breaks = c(seq(1, cap - 1, by = 2), cap),
+    labels = c(seq(1, cap - 1, by = 2), paste0(cap, "+"))
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(scale = 1)
+  ) +
+  labs(
+    x     = "Drought Length (# consecutive D4 intervals)",
+    y     = "% of All Droughts",
+    title = "Distribution of Exceptional Drought Lengths",
+    subtitle = paste0("N = ", formatC(total_droughts, big.mark = ","),
+                      " unique drought events")
+  ) +
+  theme_minimal(base_size = 13)
+
+p_dist_wtd <- ggplot(dist_data_wtd,
+                     aes(x = run_length_capped, y = pct)) +
+  geom_line(linewidth = 1.0, color = "darkorange") +
+  geom_point(size = 2.5, color = "darkorange") +
+  scale_x_continuous(
+    breaks = c(seq(1, cap - 1, by = 2), cap),
+    labels = c(seq(1, cap - 1, by = 2), paste0(cap, "+"))
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(scale = 1)
+  ) +
+  labs(
+    x     = "Drought Length (# consecutive D4 intervals)",
+    y     = "% of All D4 Intervals",
+    title = "Distribution of Drought Lengths (Interval-Weighted)",
+    subtitle = paste0("N = ", formatC(total_intervals, big.mark = ","),
+                      " total D4 grid-intervals")
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+
+```{r}
+
+#====================================================
+# Helper: find length at cumulative threshold
+#====================================================
+find_threshold <- function(dist_df, pct_threshold) {
+  dist_df %>%
+    filter(cum_pct >= pct_threshold) %>%
+    slice(1) %>%
+    pull(run_length_capped)
+}
+
+#====================================================
+# Unweighted thresholds
+#====================================================
+p50_uw <- find_threshold(dist_data, 50)
+p90_uw <- find_threshold(dist_data, 90)
+
+#====================================================
+# Weighted thresholds
+#====================================================
+p50_wt <- find_threshold(dist_data_wtd, 50)
+p90_wt <- find_threshold(dist_data_wtd, 90)
+
+#====================================================
+# Helper: add threshold lines to a cumulative plot
+#====================================================
+add_thresholds <- function(p, p50, p90, cap) {
+
+  p50_label <- ifelse(p50 == cap, paste0(cap, "+"), as.character(p50))
+  p90_label <- ifelse(p90 == cap, paste0(cap, "+"), as.character(p90))
+
+  p +
+    # 50% line
+    geom_hline(yintercept = 50, color = "red",
+               linetype = "dashed", linewidth = 0.8) +
+    annotate("text",
+             x = 1, y = 45,
+             label = paste0("50th pctile (length = ", p50_label, ")"),
+             color = "red", hjust = 0, size = 3.5) +
+
+    # 90% line
+    geom_hline(yintercept = 90, color = "darkred",
+               linetype = "dashed", linewidth = 0.8) +
+    annotate("text",
+             x = 1, y = 85,
+             label = paste0("90th pctile (length = ", p90_label, ")"),
+             color = "darkred", hjust = 0, size = 3.5)
+}
+
+#====================================================
+# Rebuild cumulative plots with threshold lines
+#====================================================
+p_cum <- ggplot(dist_data,
+                aes(x = run_length_capped, y = cum_pct)) +
+  geom_line(linewidth = 1.0, color = "steelblue") +
+  geom_point(size = 2.5, color = "steelblue") +
+  scale_x_continuous(
+    breaks = c(seq(1, cap - 1, by = 2), cap),
+    labels = c(seq(1, cap - 1, by = 2), paste0(cap, "+"))
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 20),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  labs(
+    x     = "Drought Length (# consecutive D4 intervals)",
+    y     = "Cumulative % of All Droughts",
+    title = "Cumulative Distribution of Exceptional Drought Lengths",
+    subtitle = paste0("N = ", formatC(total_droughts, big.mark = ","),
+                      " unique drought events")
+  ) +
+  theme_minimal(base_size = 13)
+
+
+p_cum <- add_thresholds(p_cum, p50_uw, p90_uw, cap)
+
+p_cum_wtd <- ggplot(dist_data_wtd,
+                    aes(x = run_length_capped, y = cum_pct)) +
+  geom_line(linewidth = 1.0, color = "darkorange") +
+  geom_point(size = 2.5, color = "darkorange") +
+  scale_x_continuous(
+    breaks = c(seq(1, cap - 1, by = 2), cap),
+    labels = c(seq(1, cap - 1, by = 2), paste0(cap, "+"))
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 20),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  labs(
+    x     = "Drought Length (# consecutive D4 intervals)",
+    y     = "Cumulative % of All D4 Intervals",
+    title = "Cumulative Distribution of Drought Lengths (Interval-Weighted)",
+    subtitle = paste0("N = ", formatC(total_intervals, big.mark = ","),
+                      " total D4 grid-intervals")
+  ) +
+  theme_minimal(base_size = 13)
+
+p_cum_wtd <- add_thresholds(p_cum_wtd, p50_wt, p90_wt, cap)
+
+#====================================================
+# Export
+#====================================================
+p_unweighted <- p_dist + p_cum
+
+png(here("data/outputs/figures/drought_length_unweighted.png"),
+    width = 1200, height = 500, res = 120)
+plot(p_unweighted)
+dev.off()
+
+p_weighted <- p_dist_wtd + p_cum_wtd
+
+png(here("data/outputs/figures/drought_length_weighted.png"),
+    width = 1200, height = 500, res = 120)
+plot(p_weighted)
+dev.off()
+
+```
+
+## just the cumulative distribution
+
+```{r}
+p_cum_wtd_solo <- ggplot(dist_data_wtd,
+                         aes(x = run_length_capped, y = cum_pct)) +
+  geom_line(linewidth = 1.0, color = "darkorange") +
+  geom_point(size = 2.5, color = "darkorange") +
+  scale_x_continuous(
+    breaks = c(seq(1, cap - 1, by = 2), cap),
+    labels = c(seq(1, cap - 1, by = 2), paste0(cap, "+"))
+  ) +
+  scale_y_continuous(
+    limits = c(0, 105),
+    breaks = seq(0, 100, by = 20),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  geom_hline(yintercept = 50, color = "red",
+             linetype = "dashed", linewidth = 0.8) +
+  annotate("text", x = 1, y = 45,
+           label = paste0("50th pctile (length = ", p50_wt, ")"),
+           color = "red", hjust = 0, size = 3.5) +
+  geom_hline(yintercept = 90, color = "darkred",
+             linetype = "dashed", linewidth = 0.8) +
+  annotate("text", x = 1, y = 85,
+           label = paste0("90th pctile (length = ", p90_wt, ")"),
+           color = "darkred", hjust = 0, size = 3.5) +
+  labs(
+    x     = "Drought Length",
+    y     = "Cumulative % (D4 Intervals)",
+    title = "Drought Interval Distribution \nby Total Drought Length"
+  ) +
+  theme_minimal(base_size = 13)
+
+p_cum_wtd_solo
+
+png(here("data/outputs/figures/drought_length_cumulative_weighted.png"),
+    width = 700, height = 500, res = 120)
+plot(p_cum_wtd_solo)
+dev.off()
+```
+
+
+
+
+## three-panel (payout by drought length, start, end)
+
+```{r}
+
+payout_by_length <- long_data %>%
+  filter(drought) %>%
+  group_by(STATE, GRIDCODE, drought_group) %>%
+  mutate(run_length = n()) %>%
+  ungroup() %>%
+  mutate(run_length_capped = pmin(run_length, cap)) %>%
+  group_by(run_length_capped) %>%
+  summarise(
+    total_intervals  = n(),
+    payout_intervals = sum(payout, na.rm = TRUE),
+    payout_pct       = 100 * payout_intervals / total_intervals,
+    .groups = "drop"
+  ) %>%
+  mutate(label = ifelse(run_length_capped == cap,
+                        paste0(cap, "+"),
+                        as.character(run_length_capped)))
+# Overall drought payout rate (for reference line)
+overall_payout_rate <- 100 * sum(long_data$drought & long_data$payout, na.rm = TRUE) /
+                             sum(long_data$drought, na.rm = TRUE)
+
+position_data <- long_data %>%
+  filter(drought) %>%
+  group_by(STATE, GRIDCODE, drought_group) %>%
+  mutate(
+    position_in_drought = row_number(),
+    run_length          = n()
+  ) %>%
+  ungroup()
+
+position_summary <- position_data %>%
+  filter(position_in_drought <= 30) %>%
+  group_by(position_in_drought) %>%
+  summarise(
+    total_intervals  = n(),
+    payout_intervals = sum(payout, na.rm = TRUE),
+    payout_pct       = 100 * payout_intervals / total_intervals,
+    .groups = "drop"
+  )
+
+position_end_data <- long_data %>%
+  filter(drought) %>%
+  group_by(STATE, GRIDCODE, drought_group) %>%
+  mutate(
+    run_length        = n(),
+    position_from_end = run_length - row_number() + 1
+  ) %>%
+  ungroup()
+
+#====================================================
+# 2. Summarise payout % by position from end
+#====================================================
+position_end_summary <- position_end_data %>%
+  filter(position_from_end <= 30) %>%
+  group_by(position_from_end) %>%
+  summarise(
+    total_intervals  = n(),
+    payout_intervals = sum(payout, na.rm = TRUE),
+    payout_pct       = 100 * payout_intervals / total_intervals,
+    .groups = "drop"
+  )
+
+p_payout_length_v2 <- ggplot(payout_by_length,
+                              aes(x = run_length_capped, y = payout_pct)) +
+  geom_line(linewidth = 1.0, color = "steelblue") +
+  geom_point(size = 2.5, color = "steelblue") +
+  geom_hline(yintercept = overall_payout_rate,
+             color = "red", linetype = "dashed", linewidth = 0.8) +
+  annotate("text",
+           x = 1, y = 85,
+           label = paste0("Drought Payout Rate (", round(overall_payout_rate), "%)"),
+           color = "red", hjust = 0, size = 5) +
+  scale_x_continuous(
+    breaks = c(seq(1, cap - 1, by = 2), cap),
+    labels = c(seq(1, cap - 1, by = 2), paste0(cap, "+"))
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 20),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  labs(
+    x     = "Drought Length",
+    y     = "RI Payout %",
+    title = "Payout by Drought Length"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.title = element_text(size = 14),
+    axis.text  = element_text(size = 13)
+  )
+
+p_position_start_v2 <- ggplot(position_summary,
+                               aes(x = position_in_drought, y = payout_pct)) +
+  geom_line(linewidth = 1.0, color = "steelblue") +
+  geom_point(size = 2.5, color = "steelblue") +
+  geom_hline(yintercept = overall_payout_rate,
+             color = "red", linetype = "dashed", linewidth = 0.8) +
+  scale_x_continuous(
+    limits = c(1, 30),
+    breaks = seq(1, 30, by = 2)
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 20),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  labs(
+    x     = "Intervals from Drought Start",
+    y     = NULL,
+    title = "Payout by Time After Drought Start"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.title = element_text(size = 14),
+    axis.text  = element_text(size = 13)
+  )
+
+p_position_end_v2 <- ggplot(position_end_summary,
+                             aes(x = position_from_end, y = payout_pct)) +
+  geom_line(linewidth = 1.0, color = "steelblue") +
+  geom_point(size = 2.5, color = "steelblue") +
+  geom_hline(yintercept = overall_payout_rate,
+             color = "red", linetype = "dashed", linewidth = 0.8) +
+  scale_x_reverse(
+    limits = c(30, 1),
+    breaks = seq(30, 1, by = -2)
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 20),
+    labels = scales::percent_format(scale = 1)
+  ) +
+  labs(
+    x     = "Intervals from Drought End",
+    y     = NULL,
+    title = "Payout by Time Before Drought End"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.title = element_text(size = 14),
+    axis.text  = element_text(size = 13)
+  )
+
+# ── Combine and export ────────────────────────────────────────────────────────
+p_payout_three <- p_payout_length_v2 | p_position_start_v2 | p_position_end_v2
+
+p_payout_three
+
+png(here("data/outputs/figures/payout_three_panel.png"),
+    width  = 1800,
+    height = 600,
+    res    = 120)
+plot(p_payout_three)
+dev.off()
+```
+
+
+## Grouped plot
+
+```{r}
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+group_levels <- c("01","02","03","04","05","06","07","08","09","10",
+                  "11-20", "21-30", "31+")
+
+make_length_group <- function(x) {
+  case_when(
+    x == 1  ~ "01", x == 2  ~ "02", x == 3  ~ "03",
+    x == 4  ~ "04", x == 5  ~ "05", x == 6  ~ "06",
+    x == 7  ~ "07", x == 8  ~ "08", x == 9  ~ "09",
+    x == 10 ~ "10",
+    x >= 11 & x <= 20 ~ "11-20",
+    x >= 21 & x <= 30 ~ "21-30",
+    x >  30            ~ "31+"
+  )
+}
+
+# Display labels — map "01" -> "1" etc for clean axis text
+group_labels <- c("1","2","3","4","5","6","7","8","9","10",
+                  "11-\n20", "21-\n30", "31+")
+group_labels_rev <- rev(group_labels)
+
+group_theme <- theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(size = 11),
+        axis.title  = element_text(size = 14))
+
+global_payout_rate <- 100 * sum(long_data$payout, na.rm = TRUE) / nrow(long_data)
+
+add_ref_lines <- function(p, show_annotation = FALSE, annotation_x = NULL) {
+  p <- p +
+    geom_hline(yintercept = overall_payout_rate,
+               color = "red", linetype = "dashed", linewidth = 0.8) +
+    geom_hline(yintercept = global_payout_rate,
+               color = "darkorange", linetype = "dashed", linewidth = 0.8)
+  if (show_annotation & !is.null(annotation_x)) {
+    p <- p +
+      annotate("text", x = annotation_x, y = overall_payout_rate + 10,
+               label = paste0("Drought payout rate (", round(overall_payout_rate), "%)"),
+               color = "red", hjust = 0, size = 4.5) +
+      annotate("text", x = annotation_x, y = global_payout_rate - 6,
+               label = paste0("Overall payout rate (", round(global_payout_rate), "%)"),
+               color = "darkorange", hjust = 0, size = 4.5)
+  }
+  p
+}
+
+sep_at    <- 10.5
+sep_at_p3 <- 3.5
+drought_end_x <- length(group_levels)
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+payout_by_length_grouped <- long_data %>%
+  filter(drought) %>%
+  group_by(STATE, GRIDCODE, drought_group) %>%
+  mutate(run_length = n()) %>%
+  ungroup() %>%
+  mutate(length_group = factor(make_length_group(run_length),
+                               levels = group_levels)) %>%
+  group_by(length_group, .drop = FALSE) %>%
+  summarise(total_intervals  = n(),
+            payout_intervals = sum(payout, na.rm = TRUE),
+            payout_pct       = 100 * payout_intervals / total_intervals,
+            .groups = "drop")
+
+position_grouped <- long_data %>%
+  filter(drought) %>%
+  group_by(STATE, GRIDCODE, drought_group) %>%
+  mutate(position_in_drought = row_number()) %>%
+  ungroup() %>%
+  mutate(length_group = factor(make_length_group(position_in_drought),
+                               levels = group_levels)) %>%
+  group_by(length_group, .drop = FALSE) %>%
+  summarise(total_intervals  = n(),
+            payout_intervals = sum(payout, na.rm = TRUE),
+            payout_pct       = 100 * payout_intervals / total_intervals,
+            .groups = "drop")
+
+position_end_grouped <- long_data %>%
+  filter(drought) %>%
+  group_by(STATE, GRIDCODE, drought_group) %>%
+  mutate(run_length        = n(),
+         position_from_end = run_length - row_number() + 1) %>%
+  ungroup() %>%
+  mutate(length_group = factor(make_length_group(position_from_end),
+                               levels = group_levels)) %>%
+  group_by(length_group, .drop = FALSE) %>%
+  summarise(total_intervals  = n(),
+            payout_intervals = sum(payout, na.rm = TRUE),
+            payout_pct       = 100 * payout_intervals / total_intervals,
+            .groups = "drop") %>%
+  mutate(length_group = factor(length_group, levels = rev(group_levels)))
+
+# ── Plots ─────────────────────────────────────────────────────────────────────
+p1_grouped <- ggplot(payout_by_length_grouped,
+                     aes(x = length_group, y = payout_pct, group = 1)) +
+  geom_vline(xintercept = sep_at, linetype = "dotted",
+             color = "grey40", linewidth = 0.8) +
+  geom_line(linewidth = 1.0, color = "steelblue") +
+  geom_point(size = 2.5, color = "steelblue") +
+  scale_x_discrete(labels = setNames(group_labels, group_levels)) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, by = 20),
+                     labels = scales::percent_format(scale = 1)) +
+  labs(x = "Drought Length", y = "RI Payout %",
+       title = "Payout by Drought Length") +
+  group_theme
+
+p1_grouped <- add_ref_lines(p1_grouped, show_annotation = TRUE,
+                             annotation_x = "01")
+
+p2_grouped <- ggplot(position_grouped,
+                     aes(x = length_group, y = payout_pct, group = 1)) +
+  geom_vline(xintercept = sep_at, linetype = "dotted",
+             color = "grey40", linewidth = 0.8) +
+  annotate("segment", x = "01", xend = "01", y = 0, yend = 100,
+           color = "black", linewidth = 1.2) +
+  geom_line(linewidth = 1.0, color = "steelblue") +
+  geom_point(size = 2.5, color = "steelblue") +
+  annotate("text", x = "01", y = 98, label = "Drought\nStart",
+           color = "black", hjust = -0.1, vjust = 1,
+           size = 4, fontface = "bold") +
+  scale_x_discrete(labels = setNames(group_labels, group_levels)) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, by = 20),
+                     labels = scales::percent_format(scale = 1)) +
+  labs(x = "Interval Position from Drought Start", y = NULL,
+       title = "Payout by Time After Drought Start") +
+  group_theme
+
+p2_grouped <- add_ref_lines(p2_grouped, show_annotation = FALSE)
+
+p3_grouped <- ggplot(position_end_grouped,
+                     aes(x = length_group, y = payout_pct, group = 1)) +
+  geom_vline(xintercept = sep_at_p3, linetype = "dotted",
+             color = "grey40", linewidth = 0.8) +
+  annotate("segment", x = drought_end_x, xend = drought_end_x, y = 0, yend = 100,
+           color = "black", linewidth = 1.2) +
+  geom_line(linewidth = 1.0, color = "steelblue") +
+  geom_point(size = 2.5, color = "steelblue") +
+  annotate("text", x = drought_end_x, y = 98, label = "Drought\nEnd",
+           color = "black", hjust = 1.1, vjust = 1,
+           size = 4, fontface = "bold") +
+  scale_x_discrete(labels = setNames(rev(group_labels), rev(group_levels))) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, by = 20),
+                     labels = scales::percent_format(scale = 1)) +
+  labs(x = "Interval Position from Drought End", y = NULL,
+       title = "Payout by Time Before Drought End") +
+  group_theme
+
+p3_grouped <- add_ref_lines(p3_grouped, show_annotation = FALSE)
+
+# ── Combine and export ────────────────────────────────────────────────────────
+p_three_grouped <- p1_grouped | p2_grouped | p3_grouped
+
+p_three_grouped
+
+png(here("data/outputs/figures/payout_three_panel_grouped.png"),
+    width = 1800, height = 600, res = 120)
+plot(p_three_grouped)
+dev.off()
+```
+
+## filtering out the last and first drought interval
+
+```{r}
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+group_levels <- c("01","02","03","04","05","06","07","08","09","10",
+                  "11-20", "21-30", "31+")
+
+make_length_group <- function(x) {
+  case_when(
+    x == 1  ~ "01", x == 2  ~ "02", x == 3  ~ "03",
+    x == 4  ~ "04", x == 5  ~ "05", x == 6  ~ "06",
+    x == 7  ~ "07", x == 8  ~ "08", x == 9  ~ "09",
+    x == 10 ~ "10",
+    x >= 11 & x <= 20 ~ "11-20",
+    x >= 21 & x <= 30 ~ "21-30",
+    x >  30            ~ "31+"
+  )
+}
+
+group_labels     <- c("1","2","3","4","5","6","7","8","9","10",
+                      "11-\n20", "21-\n30", "31+")
+group_labels_rev <- rev(group_labels)
+
+group_theme <- theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(size = 11),
+        axis.title  = element_text(size = 14))
+
+global_payout_rate <- 100 * sum(long_data$payout, na.rm = TRUE) / nrow(long_data)
+
+add_ref_lines <- function(p, show_annotation = FALSE, annotation_x = NULL) {
+  p <- p +
+    geom_hline(yintercept = overall_payout_rate,
+               color = "red", linetype = "dashed", linewidth = 0.8) +
+    geom_hline(yintercept = global_payout_rate,
+               color = "darkorange", linetype = "dashed", linewidth = 0.8)
+  if (show_annotation & !is.null(annotation_x)) {
+    p <- p +
+      annotate("text", x = annotation_x, y = overall_payout_rate + 10,
+               label = paste0("Drought payout rate (", round(overall_payout_rate), "%)"),
+               color = "red", hjust = 0, size = 4.5) +
+      annotate("text", x = annotation_x, y = global_payout_rate - 6,
+               label = paste0("Overall payout rate (", round(global_payout_rate), "%)"),
+               color = "darkorange", hjust = 0, size = 4.5)
+  }
+  p
+}
+
+sep_at        <- 10.5
+sep_at_p3     <- 3.5
+drought_end_x <- length(group_levels)
+
+# ── Plot 1: payout by drought length ─────────────────────────────────────────
+payout_by_length_grouped <- long_data %>%
+  filter(drought) %>%
+  group_by(STATE, GRIDCODE, drought_group) %>%
+  mutate(run_length = n()) %>%
+  ungroup() %>%
+  mutate(length_group = factor(make_length_group(run_length),
+                               levels = group_levels)) %>%
+  group_by(length_group, .drop = FALSE) %>%
+  summarise(total_intervals  = n(),
+            payout_intervals = sum(payout, na.rm = TRUE),
+            payout_pct       = 100 * payout_intervals / total_intervals,
+            .groups = "drop")
+
+p1_grouped <- ggplot(payout_by_length_grouped,
+                     aes(x = length_group, y = payout_pct, group = 1)) +
+  geom_vline(xintercept = sep_at, linetype = "dotted",
+             color = "grey40", linewidth = 0.8) +
+  geom_line(linewidth = 1.0, color = "steelblue") +
+  geom_point(size = 2.5, color = "steelblue") +
+  scale_x_discrete(labels = setNames(group_labels, group_levels)) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, by = 20),
+                     labels = scales::percent_format(scale = 1)) +
+  labs(x = "Drought Length", y = "RI Payout %",
+       title = "Payout by Drought Length") +
+  group_theme
+
+p1_grouped <- add_ref_lines(p1_grouped, show_annotation = TRUE,
+                             annotation_x = "01")
+
+# ── Plot 2: position from start, excluding last interval ──────────────────────
+position_grouped_trimend <- long_data %>%
+  filter(drought) %>%
+  group_by(STATE, GRIDCODE, drought_group) %>%
+  mutate(position_in_drought = row_number(),
+         run_length          = n()) %>%
+  filter(position_in_drought < run_length) %>%
+  ungroup() %>%
+  mutate(length_group = factor(make_length_group(position_in_drought),
+                               levels = group_levels)) %>%
+  group_by(length_group, .drop = FALSE) %>%
+  summarise(total_intervals  = n(),
+            payout_intervals = sum(payout, na.rm = TRUE),
+            payout_pct       = 100 * payout_intervals / total_intervals,
+            .groups = "drop")
+
+p2_grouped <- ggplot(position_grouped_trimend,
+                     aes(x = length_group, y = payout_pct, group = 1)) +
+  geom_vline(xintercept = sep_at, linetype = "dotted",
+             color = "grey40", linewidth = 0.8) +
+  annotate("segment", x = "01", xend = "01", y = 0, yend = 100,
+           color = "black", linewidth = 1.2) +
+  geom_line(linewidth = 1.0, color = "steelblue") +
+  geom_point(size = 2.5, color = "steelblue") +
+  annotate("text", x = "01", y = 98, label = "Drought\nStart",
+           color = "black", hjust = -0.1, vjust = 1,
+           size = 4, fontface = "bold") +
+  scale_x_discrete(labels = setNames(group_labels, group_levels)) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, by = 20),
+                     labels = scales::percent_format(scale = 1)) +
+  labs(x = "Interval Position from Drought Start", y = NULL,
+       title = "Payout by Time After Drought Start",
+       subtitle = "(last interval of each drought excluded)") +
+  group_theme
+
+p2_grouped <- add_ref_lines(p2_grouped, show_annotation = FALSE)
+
+# ── Plot 3: position from end, excluding first interval ───────────────────────
+position_end_grouped_trimstart <- long_data %>%
+  filter(drought) %>%
+  group_by(STATE, GRIDCODE, drought_group) %>%
+  mutate(run_length          = n(),
+         position_in_drought = row_number(),
+         position_from_end   = run_length - row_number() + 1) %>%
+  filter(position_in_drought > 1) %>%
+  ungroup() %>%
+  mutate(length_group = factor(make_length_group(position_from_end),
+                               levels = group_levels)) %>%
+  group_by(length_group, .drop = FALSE) %>%
+  summarise(total_intervals  = n(),
+            payout_intervals = sum(payout, na.rm = TRUE),
+            payout_pct       = 100 * payout_intervals / total_intervals,
+            .groups = "drop") %>%
+  mutate(length_group = factor(length_group, levels = rev(group_levels)))
+
+p3_grouped <- ggplot(position_end_grouped_trimstart,
+                     aes(x = length_group, y = payout_pct, group = 1)) +
+  geom_vline(xintercept = sep_at_p3, linetype = "dotted",
+             color = "grey40", linewidth = 0.8) +
+  annotate("segment", x = drought_end_x, xend = drought_end_x, y = 0, yend = 100,
+           color = "black", linewidth = 1.2) +
+  geom_line(linewidth = 1.0, color = "steelblue") +
+  geom_point(size = 2.5, color = "steelblue") +
+  annotate("text", x = drought_end_x, y = 98, label = "Drought\nEnd",
+           color = "black", hjust = 1.1, vjust = 1,
+           size = 4, fontface = "bold") +
+  scale_x_discrete(labels = setNames(rev(group_labels), rev(group_levels))) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, by = 20),
+                     labels = scales::percent_format(scale = 1)) +
+  labs(x = "Interval Position from Drought End", y = NULL,
+       title = "Payout by Time Before Drought End",
+       subtitle = "(first interval of each drought excluded)") +
+  group_theme
+
+p3_grouped <- add_ref_lines(p3_grouped, show_annotation = FALSE)
+
+# ── Combine and export ────────────────────────────────────────────────────────
+p_three_grouped_trimmed <- p1_grouped | p2_grouped | p3_grouped
+
+p_three_grouped_trimmed
+
+png(here("data/outputs/figures/payout_three_panel_grouped_trimmed.png"),
+    width = 1800, height = 600, res = 120)
+plot(p_three_grouped_trimmed)
+dev.off()
+
+```
+
+```{r}
+
+# Payout rate across all drought intervals, excluding the last interval of each drought
+payout_excl_last <- long_data %>%
+  filter(drought) %>%
+  group_by(STATE, GRIDCODE, drought_group) %>%
+  mutate(run_length         = n(),
+         position_in_drought = row_number()) %>%
+  filter(position_in_drought < run_length) %>%   # drop last interval of each drought
+  ungroup() %>%
+  summarise(
+    total_intervals  = n(),
+    payout_intervals = sum(payout, na.rm = TRUE),
+    payout_pct       = 100 * payout_intervals / total_intervals
+  )
+
+payout_excl_last
+
+```
+
+

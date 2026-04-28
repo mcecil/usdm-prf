@@ -5,8 +5,6 @@ output: html_notebook
 ---
 
 This notebook performs the rainfall index and payout calculations for much of the manuscript.
-It uses different spatiotemporal assumptions on the CPC and CHIRPS datasets.
-
 
 ## load required libraries
 
@@ -22,10 +20,20 @@ library(scico)
 library(ggpubr)
 library(assertthat)
 library(ggplot2)
+library(tigris)
 
 conflicted::conflict_prefer("select", "dplyr")
 conflicted::conflict_prefer("filter", "dplyr")
 options(max.print = 10000)
+```
+
+## Inputs
+
+```{r}
+
+start_year_payouts <- 2010
+end_year_payouts <- 2025
+
 ```
 
 
@@ -53,21 +61,49 @@ CHIRPS data set
 - payment factor for each interval x year
 
 
-## load rates data, join to chirps_data
+## load rates data, join to grids_intersecting
+
+Note - the rates files have a funny format. They are actually downloading two pieces of information. The Premium.Rate is based on the coverage level (70%, 75% ... 90% etc), while the County.Base.Value is based on the use type (Grazing, Haying non irrigated etc).
+
+We will just be focusing on Grazing for now as that is the largest use case. 
 
 ```{r}
 
-load(file = paste0(here("data/outputs/"), "chirps_data_TX_ri.rda"))
+load(file = paste0(here("data/outputs/grids_intersecting.rda")))
 
-rates_files <- list.files(here("data/rates_texas"), full.names = T)
+## get state names in usable vector
+states <- unique(grids_intersecting$STATE)
+full_names <- state.name[match(states, state.abb)]
+lower_hyphen_names <- gsub(" ", "-", tolower(full_names)) # Convert to lowercase + hyphenated
+
+## find rates files
+
+files <- list.files(
+  path = here("data/rates"),
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+rates_files <- files[grepl(
+  paste(full_names, collapse = "|"),
+  basename(files),
+  ignore.case = TRUE
+)]
+
+
+
+
 
 ## create single df with all rates information
 rates_df <- lapply(rates_files, function(x){
   print(x)
-  coverage_level <- strsplit(strsplit(x, "/")[[1]][9], "-")[[1]][4] %>% as.numeric()
-  use_level <- strsplit(strsplit(x, "/")[[1]][9], "-")[[1]][3] 
-  print(coverage_level)
-  print(use_level)
+  file_path_length <- length(strsplit(x, "/")[[1]])
+  file_name_length <- length(strsplit(strsplit(x, "/")[[1]][file_path_length], "-")[[1]])
+  coverage_level <- strsplit(strsplit(x, "/")[[1]][file_path_length], "-")[[1]][file_name_length - 1] %>% as.numeric()
+  # print(strsplit(strsplit(x, "/")[[1]][file_path_length], "-")[[1]])
+  # print(file_name_length)
+  use_level <- strsplit(strsplit(x, "/")[[1]][file_path_length], "-")[[1]][3:(file_name_length - 2)] 
+  use_level <- paste(use_level, collapse = "-")
   a <- read.csv(x)
   a$coverage <- coverage_level
   a$use <- use_level
@@ -75,66 +111,138 @@ rates_df <- lapply(rates_files, function(x){
 }) %>% do.call('rbind', .)
 
 
-## add rates for CPC grids and intervals to chirps_data
+## add rates for CPC grids and intervals 
+## includes a check to confirm that if a grid is listed multiple times 
+## (with the same coverage level), then it must have the same premium rate
+
+
 for (interval in 625:635){
   for(coverage_level in seq(70, 90, 5)){
-  #  print(interval)
-  #  print(coverage_level)
-    rates_df_filt <- rates_df %>% filter(Interval.Code == interval) %>% filter(coverage == coverage_level)
-    rates_df_filt <- rates_df_filt[!duplicated(rates_df_filt$CPC.Grid.Code), ]
 
-    rate_lookup_table <- setNames( rates_df_filt$Premium.Rate, rates_df_filt$CPC.Grid.Code)
-    
-    ## add column for rates for specific interval and coverage level to main table
-    chirps_data[[paste0("rate_interval_", interval, "_coverage_", coverage_level)]] <- rate_lookup_table[as.character(chirps_data$GRIDCODE)]
+    rates_df_filt <- rates_df %>% 
+      filter(Interval.Code == interval,
+             coverage == coverage_level)
+
+    # Validate duplicates
+    dup_check <- rates_df_filt %>%
+      group_by(CPC.Grid.Code) %>%
+      summarise(n_rates = n_distinct(Premium.Rate), .groups = "drop") %>%
+      filter(n_rates > 1)
+
+    if (nrow(dup_check) > 0) {
+      stop(paste(
+        "Conflicting Premium.Rate values found for interval", interval,
+        "coverage", coverage_level,
+        "CPC grids:",
+        paste(dup_check$CPC.Grid.Code, collapse = ", ")
+      ))
+    }
+
+    # Deduplicate safely
+    rates_df_filt <- rates_df_filt %>%
+      distinct(CPC.Grid.Code, .keep_all = TRUE)
+
+    rate_lookup_table <- setNames(
+      rates_df_filt$Premium.Rate,
+      rates_df_filt$CPC.Grid.Code
+    )
+
+    grids_intersecting[[paste0(
+      "rate_interval_", interval, "_coverage_", coverage_level
+    )]] <- rate_lookup_table[as.character(grids_intersecting$GRIDCODE)]
   }
 }
 
+
 ```
 
-## load CPC and CHIRPS area proportion files
+## save grids_intersecting to file with rates included 
+Also remove NA values, for grid cells that were not included in rates files
 
 ```{r}
 
-county_areas_file_path <- "data/outputs/cdl/cpc_county_areas_cdl_2023.rda"
-cpc_proportion_column <- "Proportion_cdl_2023"
+grids_intersecting_rates <- grids_intersecting %>% filter(!is.na(rate_interval_625_coverage_70))
 
-load(here(county_areas_file_path))
-#cpc_county_areas$Proportion <- cpc_county_areas$Proportion_cdl_2023
-cpc_county_areas$Proportion <- cpc_county_areas[[cpc_proportion_column]]
-
-#cpc_county_areas <- read.csv(here("data/tx_county-areas/cpc-county-areas.csv"))
-chirps_county_areas <- read.csv(here("data/tx_county-areas/chirps-county-areas.csv"))
+save(grids_intersecting_rates, 
+     file = here("data/grids_intersecting_rates.rda"))
 
 ```
 
-
-## add chirps suffixes to "chirps_data"
-## so we can merge "chirps_data" with chirps_county_areas file
+## create CPC area proportion files
+output table has columns "State.Code"     "County.Code"    "CPC.Grid.Code"  "Area"           "Proportion"    
 
 ```{r}
 
+## download counties from tigris
+state_fips <- fips_codes %>%   # built into tigris
+  filter(state %in% states) %>%
+  distinct(state, state_code)
 
-## add CHIRPS suffixes
-## this adds a column that contains CHIRPS cell IDS like "7032f"...
-## that contain a CPC grid ID followed by a letter suffix
-## I believe the letter suffixes start in the SE corner, go north for 5 cells total, 
-## and then go to the next column west an
-## y t o j e
-## x s n i d
-## w r m h c
-## v q l g b
-## u p k f a
+counties_sf <- counties(
+  state = states,
+  cb = TRUE,      # cartographic boundary (simpler, faster)
+  year = 2022
+)
 
-chirps_data$offset_X_Y <- paste0(chirps_data$CHIRPS_OFFSET_X, "_", chirps_data$CHIRPS_OFFSET_Y)
+aea_crs <- 5070  # US Albers Equal Area
 
-suffix_dict <- c("0_0" = "u",  "0_1" = "v", "0_2" = "w", "0_3" = "x", "0_4" = "y", "1_0" = "p", "1_1" = "q", "1_2" = "r", "1_3" = "s", "1_4" = "t", "2_0" = "k", "2_1" = "l", "2_2" = "m", "2_3" = "n", "2_4" = "o", "3_0" = "f", "3_1" = "g", "3_2" = "h", "3_3" = "i", "3_4" = "j", "4_0" = "a", "4_1" = "b", "4_2" = "c", "4_3" = "d", "4_4" = "e")
+counties_sf <- st_transform(counties_sf, aea_crs)
+grids_sf    <- st_transform(grids_intersecting_rates, aea_crs)
 
-chirps_data$suffix <- suffix_dict[chirps_data$offset_X_Y]
+county_grid_intersections <- st_intersection(
+  counties_sf,
+  grids_sf
+)
 
-chirps_data$CHIRPS_grid <- paste0(chirps_data$GRIDCODE, chirps_data$suffix)
+county_grid_intersections <- county_grid_intersections %>%
+  mutate(
+    Area = as.numeric(st_area(geometry))
+  )
+
+area_table <- county_grid_intersections %>%
+  group_by(STATEFP, COUNTYFP) %>%
+  mutate(
+    Proportion = Area / sum(Area)
+  ) %>%
+  ungroup()
+
+cpc_county_areas <- area_table %>%
+  mutate(
+    # ---- Your requested schema ----
+    State.Code    = as.numeric(STATEFP),  # numeric state FIPS
+    State         = STUSPS,               # TX, ND, etc.
+    County.Code   = COUNTYFP,             # 3-digit county FIPS
+    CPC.Grid.Code = GRIDCODE
+  ) %>%
+  st_drop_geometry() %>%
+  select(
+    State.Code,
+    State,
+    County.Code,
+    CPC.Grid.Code,
+    Area,
+    Proportion
+  )
+
+cpc_county_areas$County.Code <- as.numeric(cpc_county_areas$County.Code)
+
+
+save(cpc_county_areas, file = here("data/outputs/cpc_county_areas.rda"))
 
 ```
+
+## validation check
+
+```{r}
+sums_by_county <- cpc_county_areas %>%
+  group_by(State.Code, County.Code) %>%
+  summarise(sum_prop = sum(Proportion))
+
+```
+
+
+
+
 
 
 
@@ -157,13 +265,13 @@ load_rda_to_variable <- function(file_path, variable_name) {
   assign(variable_name, get(loaded_objects), envir = .GlobalEnv)
 }
 
-
 payment_calcs <- function(year, 
                           use_type = "Grazing",
-                          index_prefix = "cpc_index_1981_base_", ## index to calculate indemnities for
+                          index_prefix = "cpc_index", ## index to calculate indemnities for
                           resolution = "CPC",
-                          county_areas_file_path = "data/outputs/cdl/cpc_county_areas_cdl_2023.rda",
+                          county_areas_file_path = "data/outputs/cpc_county_areas.rda",
                           proportion_column = "Proportion",  
+                          input_grid_data = grids_intersecting_rates,
                           CDL = F){
 
   year_2 <- substr(year, 3, 4)
@@ -171,38 +279,83 @@ payment_calcs <- function(year,
   tpu <- read.csv(here(paste0("data/PRF_tpu/SOBSCCTPU", year_2, ".TXT")), sep = "|", header = F)
   names(tpu) <- names(tpu_names)
   
-  if(year == 2012){ ## 2012 had different type names
+  tpu$Type.Name <- trimws(tpu$Type.Name) # remove white space
+
+  if(year <= 2012){ ## 2012 had different type names
     tpu[tpu$Type.Name == "Grazingland", "Type.Name"] <- "Grazing"
     tpu[tpu$Type.Name == "Hayland", "Type.Name"] <- "Haying"
+    tpu[tpu$Type.Name == "GRAZINGLAND", "Type.Name"] <- "Grazing"
+    tpu[tpu$Type.Name == "HAYLAND", "Type.Name"] <- "Haying"
   }
   
-  
+  print(nrow(tpu))
+  print(tpu[1,])
+
+  tpu$Commodity.Code <- as.numeric(tpu$Commodity.Code)
+
   
   tpu <- tpu %>% 
-    filter(State.Abbreviation == "TX") %>% 
-    filter(Insurance.Plan.Abbreviation == "RI") %>% 
+    filter(State.Abbreviation %in% states) %>% 
+ #   filter(Insurance.Plan.Abbreviation == "RI") %>% 
     filter(Liability.Amount > 0) %>% 
     filter(Commodity.Code == 88) %>% ## for PRF
-    filter(Type.Name == use_type) %>% 
-    filter(Reporting.Level.Type == "Acres") 
+    filter(Type.Name == use_type)# %>% 
+ #   filter(Reporting.Level.Type == "Acres") 
   
-  
+  print(tpu[1,])
+  print(nrow(tpu))
+
+  ## add columns to store outputs
+  ri_premium_column <- paste0("Premium_", index_prefix)
+  ri_indemnity_column <- paste0("Indemnity_", index_prefix)
+  tpu[[ri_premium_column]] <- NA
+  tpu[[ri_indemnity_column]] <- NA
   
   ## filter to only non-organic non-irrigated haying
-  if(use_type == "Haying"){
+  if(use_type == "Haying" & year >= 2011){
     tpu <- tpu %>% filter(Practice.Code %in% (c(525:535, 625:635))) 
   }
   
-  
   cbv_use = c("Grazing" = "grazing", "Haying" = "hayingnonirrigatednonorganic") ## dictionary to use with rates files
   
-  tpu$CountyBaseValue <- sapply(tpu$County.Code, function(county_code){
-    rates_df_filtered <- rates_df %>%
-      filter(County.Code == county_code) %>% 
-      filter(use == cbv_use[use_type])
-    assert_that(length(unique(rates_df_filtered$County.Base.Value)) == 1)
-    return(rates_df_filtered$County.Base.Value[1])
-  })
+  tpu$CountyBaseValue <- mapply(
+    function(state_code, county_code){
+    
+      rates_df_filtered <- rates_df %>%
+        dplyr::filter(
+          State.Code  == state_code,
+          County.Code == county_code,
+          use == cbv_use[use_type]
+        )
+    
+      # ---- Case 1: No values ----
+      if (nrow(rates_df_filtered) == 0) {
+    
+        message(
+          paste0(
+            "No County.Base.Value for State.Code=",
+            state_code,
+            ", County.Code=",
+            county_code
+          )
+        )
+    
+        return(NA_real_)
+      }
+    
+      # ---- Case 2: Multiple values (keep your assertion) ----
+      assertthat::assert_that(
+        length(unique(rates_df_filtered$County.Base.Value)) == 1
+      )
+    
+      # ---- Case 3: Exactly one value ----
+      rates_df_filtered$County.Base.Value[1]
+    
+    },
+    tpu$State.Code,
+    tpu$County.Code
+  )
+
   ri_liability_column <- paste0("Liability_", index_prefix)
   tpu[[ri_liability_column]] <- tpu$CountyBaseValue * tpu$Net.Reporting.Level.Amount
   
@@ -210,6 +363,7 @@ payment_calcs <- function(year,
   ##  for each tpu row, create mini df of overlapping CPC/CHIRPS grid cells with proportions
   for(k in 1:nrow(tpu)){
     current_county_code <- tpu$County.Code[k]
+    current_state_code <- tpu$State.Code[k]
     total_liability <- tpu[[ri_liability_column]][k]
     current_interval <- tpu$Practice.Code[k]
     
@@ -217,362 +371,202 @@ payment_calcs <- function(year,
       current_interval <- current_interval + 100
     }
     
+   ## in certain years there were intervals 221... 226, represeting Jan-Feb, Mar-Apr
+   ## also in years 2010... there were intervals 648 representing Apr-June ... 652 representing Aug-Oct. we've assigned these to the last two months
+    interval_dict <- c("221" = 625, "222" = 627, "223" = 629, "224" = 631, "225" = 633, "226" = 635, "648" = 629, "649" = 630, "650" = 631, "651" = 632, "652" = 633)
+      
+     
+    if (as.character(current_interval) %in% names(interval_dict)){
+      current_interval <- interval_dict[as.character(current_interval)]
+      tpu$Practice.Code[k] <- current_interval
+    }
+      ## update practice code
+    
+    
+
+    
+    
+    
     current_coverage <- (tpu$Coverage.Level.Percent[k]) * 100
     trigger_grid_index <- tpu$Coverage.Level.Percent[k]
     
     ## get RI column
     current_interval_ri_column <- paste0(index_prefix, "_", year, "_", current_interval)
-   # print(current_interval_ri_column)
-  #  print(names(chirps_data))
-    assert_that(current_interval_ri_column %in% names(chirps_data))
+
+    if(!(current_interval_ri_column %in% names(input_grid_data))){
+      print(current_interval_ri_column)
+      print(current_interval)
+      print(tpu$Practice.Code[k])
+      print(k)
+      # print(names(input_grid_data))
+      assert_that(current_interval_ri_column %in% names(input_grid_data))
+    }
     
     ## get rate column
     current_interval_rate_column <- paste0("rate_interval_", current_interval, "_coverage_", current_coverage)
-    assert_that(current_interval_rate_column %in% names(chirps_data))
+    assert_that(current_interval_rate_column %in% names(input_grid_data))
 
     
-    if(resolution == "CHIRPS"){
-      chirps_county_areas <- read.csv(here("data/tx_county-areas/chirps-county-areas.csv"))
-
-      mini_df <- chirps_county_areas %>% filter(County.Code == current_county_code)
-      mini_df$total_liability <- total_liability
-      total_area <- sum(mini_df$Area)
-      mini_df$Proportion <- mini_df$Area / total_area
-      mini_df$weighted_liability <- mini_df$total_liability * mini_df$Proportion
-      
-      ## merge w chirps_data, get columns for ri, rating
-      mini_df <- merge(mini_df, chirps_data[, c("CHIRPS_grid", 
-                                                current_interval_ri_column, 
-                                                current_interval_rate_column)],
-                       by.x = "CHIRPS.Grid.Code",
-                       by.y = "CHIRPS_grid",
-                       all.x = T)
-      mini_df$premium <- mini_df$weighted_liability * mini_df[[current_interval_rate_column]]
-      
-      mini_df$payment_factor <- pmax(0, 
-                                    (trigger_grid_index - mini_df[[current_interval_ri_column]])/trigger_grid_index)
-      mini_df$indemnity <- mini_df$weighted_liability * mini_df$payment_factor
-      
-    }
     
-    if(resolution == "CPC"){
-      load_rda_to_variable(here(county_areas_file_path), "cpc_county_areas")
-      cpc_county_areas$Proportion <- cpc_county_areas[[proportion_column]]
+    ## calculate area-weighted (by grid) premium and payout
+    load_rda_to_variable(here(county_areas_file_path), "cpc_county_areas")
+    cpc_county_areas$Proportion <- cpc_county_areas[[proportion_column]]
 
-      mini_df <- cpc_county_areas %>% filter(County.Code == current_county_code)
-      mini_df$total_liability <- total_liability
-      total_area <- sum(mini_df$Area)
-      mini_df$weighted_liability <- mini_df$total_liability * mini_df$Proportion
-      
-      chirps_data_dedupe <- chirps_data[!duplicated(chirps_data$GRIDCODE), ]
-      ## merge w chirps_data, get columns for ri, rating
-      mini_df <- merge(mini_df, chirps_data_dedupe[, c("GRIDCODE", 
-                                                current_interval_ri_column, 
-                                                current_interval_rate_column)],
-                       by.x = "CPC.Grid.Code",
-                       by.y = "GRIDCODE",
-                       all.x = T)
-    #  print(mini_df)
-      mini_df$premium <- mini_df$weighted_liability * mini_df[[current_interval_rate_column]]
-      
-      mini_df$payment_factor <- pmax(0, 
-                                    (trigger_grid_index - mini_df[[current_interval_ri_column]])/trigger_grid_index)
-      mini_df$indemnity <- mini_df$weighted_liability * mini_df$payment_factor
-      
-    }
-    ri_premium_column <- paste0("Premium_", index_prefix)
-    tpu[[ri_premium_column]][k] <- sum(mini_df$premium, na.rm = T)
-
-    ri_indemnity_column <- paste0("Indemnity_", index_prefix)
-    tpu[[ri_indemnity_column]][k] <- sum(mini_df$indemnity, na.rm = T)
+    ## create mini_df of grid cells within county for area weighting
+    mini_df <- cpc_county_areas %>% filter(County.Code == current_county_code) %>% 
+      filter(State.Code == current_state_code)
+    mini_df$total_liability <- total_liability
+    total_area <- sum(mini_df$Area)
+    mini_df$weighted_liability <- mini_df$total_liability * mini_df$Proportion
+    
+    input_grid_data_dedupe <- input_grid_data[!duplicated(input_grid_data$GRIDCODE), ]
+    ## merge w input_grid_data, get columns for ri, rating
+    mini_df <- merge(mini_df, input_grid_data_dedupe[, c("GRIDCODE", 
+                                              current_interval_ri_column, 
+                                              current_interval_rate_column)],
+                     by.x = "CPC.Grid.Code",
+                     by.y = "GRIDCODE",
+                     all.x = T)
+  #  print(mini_df)
+    mini_df$weighted_premium <- mini_df$weighted_liability * mini_df[[current_interval_rate_column]]
+    
+    mini_df$payment_factor <- pmax(0, 
+                                  (trigger_grid_index - mini_df[[current_interval_ri_column]])/trigger_grid_index)
+    mini_df$weighted_indemnity <- mini_df$weighted_liability * mini_df$payment_factor
+   
+    weighted_premium <- sum(mini_df$weighted_premium, na.rm = T)
+    tpu[[ri_premium_column]][k] <- weighted_premium
+    tpu[[ri_indemnity_column]][k] <- sum(mini_df$weighted_indemnity, na.rm = T) 
+    
+    
   }
+
   
-  if(CDL == F){
-    save(tpu, file = here(paste0("data/outputs/payouts/tpu_", use_type, "_", year, "_", index_prefix, ".rda")))
-    print(paste0("processing ", year, " ", index_prefix, " completed"))
-    return(tpu)
-  }
-  if(CDL == T){
-    save(tpu, file = here(paste0("data/outputs/payouts/tpu_", use_type, "_", year, "_", index_prefix, "_cdl.rda")))
-    print(paste0("processing ", use_type, " ", year, " ", index_prefix, " completed"))
-    return(tpu)
-  }
+  
+
+
+  save(tpu, file = here(paste0("data/outputs/payouts/tpu_", use_type, "_", year, "_", index_prefix, ".rda")))
+  print(paste0("processing ", year, " ", index_prefix, " completed"))
+  return(tpu)
+  
+
 }
 
 ```
 
 
-## below chunk loops through each year from 2023 to 2012
+
+
+## below chunk loops through each year
 ## it calculates payouts for the following options
-### Grazing - CPC index with 1981 base year
-### Grazing - CHIRPS index
-### Grazing - CHIRPS index (coarse) averaged to CPC grids
-### Grazing - CPC index with 1948 base year
-### Same as above for Haying
+### Grazing - CPC index 
+
 
 ```{r}
 
-for(year in 2023:2012){
+payouts_outputs_folder <- here("data/outputs/payouts")
+
+if (!dir.exists(payouts_outputs_folder)) {
+  dir.create(payouts_outputs_folder)
+}
+
+for(year in start_year_payouts:end_year_payouts){
   print(year)
-  a1 <- payment_calcs(year,
-              use_type = "Grazing",
-              index_prefix = "cpc_index_1981_base",
-              resolution = "CPC",
-              county_areas_file_path = "data/outputs/cdl/cpc_county_areas_cdl_2023.rda",
-              proportion_column = "Proportion")
 
-  a2 <-  payment_calcs(year,
-              use_type = "Grazing",
-              index_prefix = "CHIRPS_index",
-              resolution = "CHIRPS")
-
-  a3 <- payment_calcs(year,
-              use_type = "Grazing",
-              index_prefix = "CHIRPS_index_coarse",
-              resolution = "CPC",
-              county_areas_file_path = "data/outputs/cdl/cpc_county_areas_cdl_2023.rda",
-              proportion_column = "Proportion")
-  
   a4 <- payment_calcs(year,
               use_type = "Grazing",
               index_prefix = "cpc_index",
               resolution = "CPC",
-              county_areas_file_path = "data/outputs/cdl/cpc_county_areas_cdl_2023.rda",
+              county_areas_file_path = "data/outputs/cpc_county_areas.rda",
+              input_grid_data = grids_intersecting_rates,
               proportion_column = "Proportion")
 
-  a5 <- payment_calcs(year,
-              use_type = "Haying",
-              index_prefix = "cpc_index_1981_base",
-              resolution = "CPC",
-              county_areas_file_path = "data/outputs/cdl/cpc_county_areas_cdl_2023.rda",
-              proportion_column = "Proportion")
-
-  a6 <-  payment_calcs(year,
-              use_type = "Haying",
-              index_prefix = "CHIRPS_index",
-              resolution = "CHIRPS")
-
-  a7 <- payment_calcs(year,
-              use_type = "Haying",
-              index_prefix = "CHIRPS_index_coarse",
-              resolution = "CPC",
-              county_areas_file_path = "data/outputs/cdl/cpc_county_areas_cdl_2023.rda",
-              proportion_column = "Proportion")
-  
-  a8 <- payment_calcs(year,
-              use_type = "Haying",
-              index_prefix = "cpc_index",
-              resolution = "CPC",
-              county_areas_file_path = "data/outputs/cdl/cpc_county_areas_cdl_2023.rda",
-              proportion_column = "Proportion")
 }
 
 ```
 
-## Calculate payouts with CDL proportions for 2021-2023
+
+## count and remove NA values (due to missing county base values)
 
 ```{r}
 
-
-for(year in 2023:2021){
+for(year in start_year_payouts:end_year_payouts){
   print(year)
-  a10 <- payment_calcs(year,
-                       use_type = "Haying",
-                       index_prefix = "cpc_index_1981_base",
-                       resolution = "CPC",
-                       county_areas_file_path = here(paste0("data/outputs/cdl/cpc_county_areas_cdl_",
-                                                            year,
-                                                            ".rda")),
-                       proportion_column = "Proportion_cdl",
-                       CDL = T)
+    load_rda_to_variable(here(paste0("data/outputs/payouts/tpu_Grazing_", year, "_cpc_index.rda")), 
+                       "tpu_with_na")
+  print(paste0("NA count ", sum(is.na(tpu_with_na$CountyBaseValue)) ))
+  save(tpu_with_na, file = here(paste0("data/outputs/payouts/tpu_Grazing_", year, "_cpc_index_W_NA.rda")))
+  
+  tpu <- tpu_with_na %>% filter(!is.na(CountyBaseValue))
+  print(nrow(tpu_with_na))
+  print(nrow(tpu))
+  
+  save(tpu, file = here(paste0("data/outputs/payouts/tpu_Grazing_", year, "_cpc_index.rda")))
+
 }
 
 
 
 ```
-
 
 ## consolidate statistics for each year
 ## create year_df, a data frame listing liabilities/premia/indemnities
 ## from the statement of business files (raw)
-## and comparing them with those from different indices (e.g. "cpc" for cpc with 1981 baseline etc)
+## and comparing payouts between cpc_index estimated and "raw" payouts from SOB files
 ```{r}
 
-year_df <- data.frame("year" = 2012:2023)
+year_df <- data.frame("year" = start_year_payouts:end_year_payouts)
 year_df$grazing_raw_liability <- NA
 year_df$grazing_raw_premium <- NA
 year_df$grazing_estimated_liability <- NA
 year_df$grazing_cpc_premium <- NA
-year_df$grazing_cpc_1948_premium <- NA
-year_df$grazing_chirps_premium <- NA
-year_df$grazing_chirps_coarse_premium <- NA
-year_df$grazing_raw_indemnity <- NA
 year_df$grazing_cpc_indemnity <- NA
-year_df$grazing_cpc_1948_indemnity <- NA
-year_df$grazing_chirps_indemnity <- NA
-year_df$grazing_chirps_coarse_indemnity <- NA
-year_df$haying_raw_liability <- NA
-year_df$haying_raw_indemnity <- NA
-year_df$haying_estimated_liability <- NA
-year_df$haying_cpc_indemnity <- NA
-year_df$haying_cpc_1948_indemnity <- NA
-year_df$haying_chirps_indemnity <- NA
-year_df$haying_chirps_coarse_indemnity <- NA
-year_df$haying_raw_premium <- NA
-year_df$haying_cpc_premium <- NA
-year_df$haying_cpc_1948_premium <- NA
-year_df$haying_chirps_premium <- NA
-year_df$haying_chirps_coarse_premium <- NA
+
 
 for(k in 1:nrow(year_df)){
   year <- year_df$year[k]
-  
-  load_rda_to_variable(here(paste0("data/outputs/payouts/tpu_Grazing_", year, "_cpc_index_1981_base.rda")), 
-                       "df")
-  
-  year_df$grazing_raw_liability[k] <- sum(df$Liability.Amount)
-  year_df$grazing_raw_premium[k] <- sum(df$Total.Premium.Amount)
-  year_df$grazing_raw_indemnity[k] <- sum(df$Indemnity.Amount)
-  
-  year_df$grazing_estimated_liability[k] <- sum(df$Liability_cpc_index_1981_base)
-  
-  year_df$grazing_cpc_indemnity[k] <- sum(df$Indemnity_cpc_index_1981_base)
-  year_df$grazing_cpc_premium[k] <- sum(df$Premium_cpc_index_1981_base)
-
-  
   
   load_rda_to_variable(here(paste0("data/outputs/payouts/tpu_Grazing_", year, "_cpc_index.rda")), 
                        "df")
   
 
-  year_df$grazing_cpc_1948_indemnity[k] <- sum(df$Indemnity_cpc_index)
-  year_df$grazing_cpc_1948_premium[k] <- sum(df$Premium_cpc_index)
-  
-  
-  
-  
-  load_rda_to_variable(here(paste0("data/outputs/payouts/tpu_Grazing_", year, "_chirps_index.rda")), 
-                       "df")
-  year_df$grazing_chirps_indemnity[k] <- sum(df$Indemnity_CHIRPS_index)
-  year_df$grazing_chirps_premium[k] <- sum(df$Premium_CHIRPS_index)
+  year_df$grazing_cpc_indemnity[k] <- sum(df$Indemnity_cpc_index)
+  year_df$grazing_raw_indemnity[k] <- sum(df$Indemnity.Amount)
+  year_df$grazing_cpc_premium[k] <- sum(df$Premium_cpc_index)
+  year_df$grazing_raw_premium[k] <- sum(df$Total.Premium.Amount)
+  year_df$grazing_estimated_liability[k] <- sum(df$Liability_cpc_index)
+  year_df$grazing_raw_liability[k] <- sum(df$Liability.Amount)
 
-  
-  load_rda_to_variable(here(paste0("data/outputs/payouts/tpu_Grazing_", year, "_chirps_index_coarse.rda")), 
-                       "df")
-  year_df$grazing_chirps_coarse_indemnity[k] <- sum(df$Indemnity_CHIRPS_index_coarse)
-  year_df$grazing_chirps_coarse_premium[k] <- sum(df$Premium_CHIRPS_index_coarse)
-
-  load_rda_to_variable(here(paste0("data/outputs/payouts/tpu_Haying_", year, "_cpc_index_1981_base.rda")), 
-                       "df")
-  
-  year_df$haying_raw_liability[k] <- sum(df$Liability.Amount)
-  year_df$haying_raw_premium[k] <- sum(df$Total.Premium.Amount)
-  year_df$haying_raw_indemnity[k] <- sum(df$Indemnity.Amount)
-  year_df$haying_estimated_liability[k] <- sum(df$Liability_cpc_index_1981_base)
-
-  year_df$haying_cpc_indemnity[k] <- sum(df$Indemnity_cpc_index_1981_base)
-  year_df$haying_cpc_premium[k] <- sum(df$Premium_cpc_index_1981_base)
-  
-  load_rda_to_variable(here(paste0("data/outputs/payouts/tpu_Haying_", year, "_cpc_index.rda")), 
-                       "df")
-  
-
-  year_df$haying_cpc_1948_indemnity[k] <- sum(df$Indemnity_cpc_index)
-  year_df$haying_cpc_1948_premium[k] <- sum(df$Premium_cpc_index)
-
-  load_rda_to_variable(here(paste0("data/outputs/payouts/tpu_Haying_", year, "_chirps_index.rda")), 
-                       "df")
-  year_df$haying_chirps_indemnity[k] <- sum(df$Indemnity_CHIRPS_index)
-  year_df$haying_chirps_premium[k] <- sum(df$Premium_CHIRPS_index)
-
-  load_rda_to_variable(here(paste0("data/outputs/payouts/tpu_Haying_", year, "_chirps_index_coarse.rda")), 
-                       "df")
-  year_df$haying_chirps_coarse_indemnity[k] <- sum(df$Indemnity_CHIRPS_index_coarse)
-  year_df$haying_chirps_coarse_premium[k] <- sum(df$Premium_CHIRPS_index_coarse)
-  
-  ## add CDL payouts
-  if(year %in% 2021:2023){
-    load_rda_to_variable(here(paste0("data/outputs/payouts/tpu_Grazing_", year, "_cpc_index_1981_base_cdl.rda")), 
-                       "df")
-    year_df$grazing_cpc_indemnity_cdl[k] <- sum(df$Indemnity_cpc_index_1981_base)
-    load_rda_to_variable(here(paste0("data/outputs/payouts/tpu_Haying_", year, "_cpc_index_1981_base_cdl.rda")), 
-                       "df")
-    year_df$haying_cpc_indemnity_cdl[k] <- sum(df$Indemnity_cpc_index_1981_base)
-  } else {
-    year_df$grazing_cpc_indemnity_cdl[k] <- NA
-    year_df$haying_cpc_indemnity_cdl[k] <- NA
-  }
 }
 
 
-## combined grazing + haying indemnities
-year_df$combined_raw_indemnity <- year_df$grazing_raw_indemnity + year_df$haying_raw_indemnity
-year_df$combined_cpc_indemnity <- year_df$grazing_cpc_indemnity + year_df$haying_cpc_indemnity
-year_df$combined_cpc_1948_indemnity <- year_df$grazing_cpc_1948_indemnity + year_df$haying_cpc_1948_indemnity
-year_df$combined_chirps_indemnity <- year_df$grazing_chirps_indemnity + year_df$haying_chirps_indemnity
-year_df$combined_chirps_coarse_indemnity <- year_df$grazing_chirps_coarse_indemnity + year_df$haying_chirps_coarse_indemnity
-year_df$combined_cpc_indemnity_cdl <- year_df$grazing_cpc_indemnity_cdl + year_df$haying_cpc_indemnity_cdl
+# ## combined grazing + haying indemnities
+# year_df$combined_raw_indemnity <- year_df$grazing_raw_indemnity + year_df$haying_raw_indemnity
+# year_df$combined_cpc_indemnity <- year_df$grazing_cpc_indemnity + year_df$haying_cpc_indemnity
+# 
+# 
+# ## combined ratios
+# 
+# year_df$combined_ratio_cpc_raw <- round(year_df$combined_cpc_indemnity/year_df$combined_raw_indemnity, 2)
 
-## combined ratios
-year_df$combined_ratio_chirps_cpc <- round(year_df$combined_chirps_indemnity/year_df$combined_cpc_indemnity, 2)
-year_df$combined_ratio_cpc_raw <- round(year_df$combined_cpc_indemnity/year_df$combined_raw_indemnity, 2)
-year_df$combined_ratio_cpc_cdl_raw <- round(year_df$combined_cpc_indemnity_cdl/year_df$combined_raw_indemnity, 2)
-year_df$combined_ratio_cpc_cdl_cpc <- round(year_df$combined_cpc_indemnity_cdl/year_df$combined_cpc_indemnity, 2)
-year_df$combined_ratio_cpc_1948_cpc_1981 <- round(year_df$combined_cpc_1948_indemnity/year_df$combined_cpc_indemnity, 2)
-year_df$combined_ratio_chirps_coarse_chirps <- round(year_df$combined_chirps_coarse_indemnity/year_df$combined_chirps_indemnity, 2)
 
 
 ## changes in indemnities, premia
 # grazing indemnity
 year_df$grazing_ratio_indemnity_grazing_cpc <- round((year_df$grazing_cpc_indemnity)/year_df$grazing_raw_indemnity, 3)
-year_df$grazing_ratio_indemnity_grazing_cpc_1948 <- round((year_df$grazing_cpc_1948_indemnity)/year_df$grazing_raw_indemnity, 3)
-year_df$grazing_ratio_indemnity_grazing_chirps <- round((year_df$grazing_chirps_indemnity)/year_df$grazing_raw_indemnity, 3)
-year_df$grazing_ratio_indemnity_grazing_chirps_coarse <- round((year_df$grazing_chirps_coarse_indemnity)/year_df$grazing_raw_indemnity, 3)
 
 # grazing premia
 year_df$grazing_ratio_premium_grazing_cpc <- round((year_df$grazing_cpc_premium)/year_df$grazing_raw_premium, 3)
-year_df$grazing_ratio_premium_grazing_cpc_1948 <- round((year_df$grazing_cpc_1948_premium)/year_df$grazing_raw_premium, 3)
-year_df$grazing_ratio_premium_grazing_chirps <- round((year_df$grazing_chirps_premium)/year_df$grazing_raw_premium, 3)
-year_df$grazing_ratio_premium_grazing_chirps_coarse <- round((year_df$grazing_chirps_coarse_premium)/year_df$grazing_raw_premium, 3)
-
-# haying indemnity
-year_df$haying_ratio_indemnity_haying_cpc <- round((year_df$haying_cpc_indemnity)/year_df$haying_raw_indemnity, 3)
-year_df$haying_ratio_indemnity_haying_cpc_1948 <- round((year_df$haying_cpc_1948_indemnity)/year_df$haying_raw_indemnity, 3)
-year_df$haying_ratio_indemnity_haying_chirps <- round((year_df$haying_chirps_indemnity)/year_df$haying_raw_indemnity, 3)
-year_df$haying_ratio_indemnity_haying_chirps_coarse <- round((year_df$haying_chirps_coarse_indemnity)/year_df$haying_raw_indemnity, 3)
-
-# haying premia
-year_df$haying_ratio_premium_haying_cpc <- round((year_df$haying_cpc_premium )/year_df$haying_raw_premium, 3)
-year_df$haying_ratio_premium_haying_cpc_1948 <- round((year_df$haying_cpc_1948_premium )/year_df$haying_raw_premium, 3)
-year_df$haying_ratio_premium_haying_chirps <- round((year_df$haying_chirps_premium)/year_df$haying_raw_premium, 3)
-year_df$haying_ratio_premium_haying_chirps_coarse <- round((year_df$haying_chirps_coarse_premium)/year_df$haying_raw_premium, 3)
 
 ## cost ratios
 year_df$grazing_cr_raw <- round(year_df$grazing_raw_indemnity/ year_df$grazing_raw_premium, 3)
 year_df$grazing_cr_cpc <- round(year_df$grazing_cpc_indemnity/ year_df$grazing_cpc_premium, 3)
-year_df$grazing_cr_cpc_1948 <- round(year_df$grazing_cpc_1948_indemnity/ year_df$grazing_cpc_premium, 3)
-year_df$grazing_cr_chirps <- round(year_df$grazing_chirps_indemnity/ year_df$grazing_chirps_premium, 3)
-year_df$grazing_cr_chirps_coarse <- round(year_df$grazing_chirps_coarse_indemnity/ year_df$grazing_chirps_coarse_premium, 3)
-
-year_df$haying_cr_raw <- round(year_df$haying_raw_indemnity/ year_df$haying_raw_premium, 3)
-year_df$haying_cr_cpc <- round(year_df$haying_cpc_indemnity/ year_df$haying_cpc_premium, 3)
-year_df$haying_cr_cpc_1948 <- round(year_df$haying_cpc_1948_indemnity/ year_df$haying_cpc_1948_premium, 3)
-year_df$haying_cr_chirps <- round(year_df$haying_chirps_indemnity/ year_df$haying_chirps_premium, 3)
-year_df$haying_cr_chirps_coarse <- round(year_df$haying_chirps_coarse_indemnity/ year_df$haying_chirps_coarse_premium, 3)
 
 ## cost ratio comparisons
 year_df$grazing_cr_comparison_cpc <- round(year_df$grazing_cr_cpc/ year_df$grazing_cr_raw, 3)
-year_df$grazing_cr_comparison_cpc_1948 <- round(year_df$grazing_cr_cpc_1948/ year_df$grazing_cr_raw, 3)
-year_df$grazing_cr_comparison_chirps <- round(year_df$grazing_cr_chirps/ year_df$grazing_cr_raw, 3)
-year_df$grazing_cr_comparison_chirps_coarse <- round(year_df$grazing_cr_chirps_coarse/ year_df$grazing_cr_raw, 3)
 
-year_df$haying_cr_comparison_cpc <- round(year_df$haying_cr_cpc/ year_df$haying_cr_raw, 3)
-year_df$haying_cr_comparison_cpc_1948 <- round(year_df$haying_cr_cpc_1948/ year_df$haying_cr_raw, 3)
-year_df$haying_cr_comparison_chirps <- round(year_df$haying_cr_chirps/ year_df$haying_cr_raw, 3)
-year_df$haying_cr_comparison_chirps_coarse <- round(year_df$haying_cr_chirps_coarse/ year_df$haying_cr_raw, 3)
 
 year_df$grazing_liability_ratio <- round(year_df$grazing_estimated_liability/year_df$grazing_raw_liability, 3)
-year_df$haying_liability_ratio <- round(year_df$haying_estimated_liability/year_df$haying_raw_liability, 3)
 
 write.csv(year_df, file = here("data/outputs/payouts/payouts_by_year.csv"))
 
