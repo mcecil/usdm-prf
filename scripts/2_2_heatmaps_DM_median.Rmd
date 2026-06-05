@@ -244,12 +244,14 @@ highlight_labels <- tibble(
 p_heatmap_dm <- ggplot(heatmap_data, aes(x = label, y = factor(year), fill = pct_high_dm)) +
   geom_tile(color = "lightgrey", linewidth = 0.3) +
   scale_fill_gradientn(
-    colors = c("white", viridis(100, option = "C", direction = -1)),
-    values = rescale(c(0, eps, seq(eps, max_val, length.out = 100))),
-    limits = c(0, max_val),
-    name = "% DM = 4",
-    na.value = "grey90"
-  ) +
+      colors = c("white", viridis(100, option = "C", direction = -1)),
+      values = rescale(c(0, eps, seq(eps, max_val, length.out = 100))),
+      limits = c(0, max_val),
+      name = "% DM = 4",
+      na.value = "grey90",
+      breaks = c(0, 10, 20, max_val),
+      labels = c("0", "10", "20", paste0(round(max_val), " (max)"))
+    ) +
   # Highlight boxes drawn on top
 # Outer black border
   geom_rect(
@@ -272,10 +274,10 @@ p_heatmap_dm <- ggplot(heatmap_data, aes(x = label, y = factor(year), fill = pct
   labs(
     x = "Interval",
     y = "Year",
-    title = "Heatmap of High Drought Frequency (DM Max = 4)",
+    title = "Heatmap of High Drought Frequency (DM = 4)",
     fill = "% High DM"
   ) +
-  theme_minimal(base_size = 13) +
+  theme_minimal(base_size = 16) +
   theme(
     axis.text.x = element_text(angle = 45, hjust = 1),
     panel.grid = element_blank()
@@ -284,7 +286,7 @@ p_heatmap_dm <- ggplot(heatmap_data, aes(x = label, y = factor(year), fill = pct
     data = highlight_labels,
     aes(x = x, y = y, label = label),
     inherit.aes = FALSE,
-    size = 3.5,
+    size = 5,
     fontface = "bold",
     color = "black"
   )
@@ -420,7 +422,7 @@ p_heatmap_ri <- ggplot(heatmap_ri, aes(x = label, y = factor(year), fill = pct_p
     data = highlight_labels,
     aes(x = x, y = y, label = label),
     inherit.aes = FALSE,
-    size = 3.5,
+    size = 5,
     fontface = "bold",
     color = "white"
   ) +
@@ -428,9 +430,10 @@ p_heatmap_ri <- ggplot(heatmap_ri, aes(x = label, y = factor(year), fill = pct_p
     name = "% Payout (RI ≤ 0.90)",
     option = "C",
     direction = -1,
-    limits = c(min_val, max_val)
+    limits = c(min_val, max_val),
+    breaks = c(min_val, 25, 50, 75, max_val),
+    labels = c(paste0(round(min_val), " (min)"), "25", "50", "75", paste0(round(max_val), " (max)"))
   ) +
-  
   labs(
     x = "Interval",
     y = "Year",
@@ -438,7 +441,7 @@ p_heatmap_ri <- ggplot(heatmap_ri, aes(x = label, y = factor(year), fill = pct_p
     fill = "% Payout"
   ) +
   
-  theme_minimal(base_size = 13) +
+  theme_minimal(base_size = 16) +
   theme(
     axis.text.x = element_text(angle = 45, hjust = 1),
     panel.grid = element_blank()

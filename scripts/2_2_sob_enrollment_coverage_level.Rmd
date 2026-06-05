@@ -656,23 +656,25 @@ p_acres <- ggplot(acres_by_cov,
                       y = acres,
                       color = factor(Coverage.Level.Percent),
                       group = Coverage.Level.Percent)) +
-  geom_line(linewidth = 1.1) +
+  geom_line(linewidth = 1.2) +
   geom_point(size = 2) +
   scale_y_continuous(labels = comma) +
   labs(
     title = "Insured Acres by Coverage Level",
-    subtitle = "Nine-State Region",
     x = NULL,
     y = "Acres",
     color = "Coverage Level (%)"
   ) +
   theme_minimal() +
   theme(
-    axis.text = element_text(size = 12),
-    axis.title = element_text(size = 13),
-    plot.title = element_text(size = 14)
+    axis.title = element_text(size = 14),
+    axis.text  = element_text(size = 13),
+    plot.title = element_text(size = 16),
+    legend.position = "top",
+    legend.text  = element_text(size = 13),
+    legend.title = element_text(size = 14),
+    legend.key.size = unit(1.2, "lines")
   )
-
 #---------------------------
 # 5) Plot — Share of acres
 #---------------------------

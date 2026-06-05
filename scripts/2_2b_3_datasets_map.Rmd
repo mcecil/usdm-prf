@@ -196,20 +196,38 @@ library(tigris)
 
 options(tigris_use_cache = TRUE)
 
+## Pecos county TX
+# state_abbreviation = "TX"
+# state_code = "48"
+# county_code = "371"
+# county_text = "Pecos County, Texas"
+
+## Butler county KS
+state_abbreviation = "KS"
+state_code = "20"
+county_code = "15"
+county_text = "Butler County, Kansas"
+
+## Finney county KS
+# state_abbreviation = "KS"
+# state_code = "20"
+# county_code = "55"
+# county_text = "Finney County, Kansas"
+
 #---------------------------
-# 1) Texas boundary
+# 1) State boundary
 #---------------------------
-tx_sf <- states(cb = TRUE, year = 2022) %>%
-  filter(STUSPS == "TX") %>%
+state_sf <- states(cb = TRUE, year = 2022) %>%
+  filter(STUSPS == state_abbreviation) %>%
   st_as_sf()
 
 #---------------------------
-# 3) Pecos County boundary
+# 3) County boundary
 #   FIPS: 48-371
 #---------------------------
-pecos_boundary <- tpu_sf %>%
-  filter(State.Code == "48",
-         County.Code == "371") %>%
+county_boundary <- tpu_sf %>%
+  filter(State.Code == state_code,
+         County.Code == county_code) %>%
   st_union() %>%
   st_as_sf()
 
@@ -217,34 +235,34 @@ pecos_boundary <- tpu_sf %>%
 #---------------------------
 # 5) Match CRS
 #---------------------------
-tx_sf           <- st_transform(tx_sf, st_crs(usdm))
-pecos_boundary  <- st_transform(pecos_boundary, st_crs(usdm))
+state_sf           <- st_transform(state_sf, st_crs(usdm))
+county_boundary  <- st_transform(county_boundary, st_crs(usdm))
 grids_intersecting_rates <- st_transform(grids_intersecting, st_crs(usdm))
 
 
 #---------------------------
 # 2) Clip USDM to Texas
 #---------------------------
-usdm_tx <- st_intersection(usdm, tx_sf)
+usdm_state <- st_intersection(usdm, state_sf)
 
 
 
 #---------------------------
 # 4) CPC grids intersecting Pecos
 #---------------------------
-grids_pecos <- grids_intersecting_rates[
+grids_county <- grids_intersecting_rates[
   st_intersects(grids_intersecting_rates,
-                pecos_boundary,
+                county_boundary,
                 sparse = FALSE),
 ]
 
-grids_pecos     <- st_transform(grids_pecos, st_crs(usdm))
+grids_county     <- st_transform(grids_county, st_crs(usdm))
 
 #---------------------------
 # 6) USDM color palette
 #---------------------------
 
-usdm_tx <- usdm_tx %>%
+usdm_state <- usdm_state %>%
   mutate(
     DM = factor(DM,
                 levels = c(0, 1, 2, 3, 4),
@@ -266,46 +284,55 @@ usdm_cols <- c(
 # 7) Plot
 #---------------------------
 p_map_3_datasets <- ggplot() +
-
-  # USDM polygons (clipped to TX)
-  geom_sf(data = usdm_tx,
+  geom_sf(data = usdm_state,
           aes(fill = DM),
           color = NA) +
-
-  # CPC grid boundaries (blue)
-  geom_sf(data = grids_pecos,
+  # Replace original grids_county and county_boundary layers with these
+  # which feed into scale_color_manual for the legend
+  geom_sf(data = grids_county,
+          aes(color = "CPC Grids"),
           fill = NA,
-          color = "blue",
           linewidth = 0.4) +
-
-  # Pecos County boundary
-  geom_sf(data = pecos_boundary,
+  geom_sf(data = county_boundary,
+          aes(color = "Butler County"),
           fill = NA,
-          color = "black",
           linewidth = 1.2) +
-
-  # Texas boundary
-  geom_sf(data = tx_sf,
+  geom_sf(data = state_sf,
           fill = NA,
           color = "black",
           linewidth = 0.8) +
-
-  scale_fill_manual(values = usdm_cols,
-                    na.value = "white") +
-
+  scale_fill_manual(values = usdm_cols, na.value = "white") +
+  scale_color_manual(
+    name = NULL,
+    values = c("CPC Grids" = "blue",
+               "Butler County" = "black")
+  ) +
+  guides(
+    fill  = guide_legend(order = 1),
+    color = guide_legend(order = 2, override.aes = list(linewidth = c(0.4, 1.2)))
+  ) +
   coord_sf() +
   theme_minimal() +
   labs(
-    title = "USDM Classification June 7 2011",
-    subtitle = "Pecos County, Texas",
-    fill = "USDM"
+    title = paste0("Data Footprint - ", county_text),
+    fill = "USDM (June 7 2011)"
+  ) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    plot.title    = element_text(size = 20),
+    plot.subtitle = element_text(size = 18),
+    legend.title  = element_text(size = 20),
+    legend.text   = element_text(size = 20),
+    legend.key.size = unit(1.2, "lines")
   )
 
 p_map_3_datasets
 
 png(here("data/outputs/figures/p_map_3_datasets.png"),
     width = 800,
-    height = 800)
+    height = 400)
 plot(p_map_3_datasets)
 dev.off()
 

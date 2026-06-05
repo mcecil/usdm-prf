@@ -26,6 +26,7 @@ library(stringr)
 library(fixest)
 library(rlang)
 library(exactextractr)
+library(tinytex)
 
 conflicted::conflict_prefer("select", "dplyr")
 conflicted::conflict_prefer("filter", "dplyr")
@@ -47,118 +48,7 @@ tpu_collapsed <- tpu_collapsed %>%
 
 ```
 
-## create summary stats table for regression vars
 
-```{r}
-
-library(dplyr)
-library(here)
-
-#====================================================
-# Function: export_desc_stats_latex
-#====================================================
-# vars_spec: a list of lists, each with:
-#   - col:   column name in df
-#   - label: bold label text e.g. "Acreage enrolled"
-#   - units: units string e.g. "acres" (or NULL)
-#   - comment: TRUE/FALSE to comment out the row (default FALSE)
-
-export_desc_stats_latex <- function(df, vars_spec, file_path,
-                                    caption = NULL, label = "tab:desc_stats") {
-
-  # ── Format numbers ──────────────────────────────────────────────────────────
-  fmt_num <- function(x) {
-    if (is.na(x)) return("--")
-    if (abs(x) >= 1000) {
-      formatC(x, format = "f", digits = 0, big.mark = ",")
-    } else if (abs(x) >= 10) {
-      formatC(x, format = "f", digits = 1, big.mark = ",")
-    } else {
-      formatC(x, format = "f", digits = 2, big.mark = ",")
-    }
-  }
-
-  # ── Build each row ──────────────────────────────────────────────────────────
-  rows <- lapply(vars_spec, function(v) {
-
-    col     <- v$col
-    label_v <- v$label
-    units   <- if (!is.null(v$units)) v$units else NULL
-    comment <- if (!is.null(v$comment) && v$comment) "%" else ""
-
-    vals <- df[[col]]
-    vals_clean <- vals[!is.na(vals)]
-
-    mean_v <- fmt_num(mean(vals_clean))
-    sd_v   <- fmt_num(sd(vals_clean))
-    min_v  <- fmt_num(min(vals_clean))
-    max_v  <- fmt_num(max(vals_clean))
-    n_v    <- formatC(length(vals_clean), format = "d", big.mark = ",")
-
-    # Variable label cell
-    if (!is.null(units)) {
-      var_cell <- paste0("\\textbf{", label_v, "} (", units, ")")
-    } else {
-      var_cell <- paste0("\\textbf{", label_v, "}")
-    }
-
-    row_str <- paste0(
-      comment,
-      var_cell, " & ", mean_v, " & ", sd_v, " & ",
-      min_v, " & ", max_v, " & ", n_v, " \\\\"
-    )
-
-    row_str
-  })
-
-  body_rows <- paste(unlist(rows), collapse = "\n")
-
-  # ── Caption ─────────────────────────────────────────────────────────────────
-  caption_txt <- if (is.null(caption)) "" else caption
-
-  # ── Full table ──────────────────────────────────────────────────────────────
-  latex <- paste0(
-"\\small
-\\begin{table}[htbp]
-\\centering
-\\begin{tabular}{p{7cm}rrrrr}
-\\toprule
-\\textbf{Variable} & Mean & Std.\\ Dev. & Min & Max & N \\\\
-\\midrule
-", body_rows, "
-\\bottomrule
-\\end{tabular}
-\\caption{", caption_txt, "}
-\\label{", label, "}
-\\end{table}
-\\normalsize"
-  )
-
-  writeLines(latex, file_path)
-  message("Exported: ", file_path)
-}
-
-#====================================================
-# Example usage
-#====================================================
-vars_spec <- list(
-  list(col = "Net.Reporting.Level.Amount",    label = "PRF-RI enrolllment",    units = "acres"),
-  list(col = "DM_mean", label = "Drought exposure",    units = "mean DM classification"),
-  list(col = "loss_ratio_raw",  label = "Cost ratio",   units = "indemnities/premia"),
-  list(col = "RI_payout_pct", label = "PRF-RI payout %", units = "% grid-intervals w payout")
-)
-
-export_desc_stats_latex(
-  df        = tpu_collapsed,
-  vars_spec = vars_spec,
-  file_path = here("data/outputs/tables/desc_stats_regression.tex"),
-  caption   = "Descriptive statistics for regression variables. Each observation is a unique county-year with non-zero enrollment",
-  label     = "tab:desc_stats"
-)
-
-
-
-```
 
 
 
@@ -293,6 +183,10 @@ etable(
 
 ```
 
+
+
+
+
 ## percent changes in enrollment
 ```{r}
 # ── Exact percent changes from county FE model ────────────────────────────────
@@ -329,239 +223,468 @@ cat("Interaction (loss ratio=1, DM=4 jointly):\n")
 cat(" ", pct_change(beta_lr + beta_dm * 4 + beta_int * 4), "%\n\n")
 ```
 
-
-
-## maps for county-level regressions (faded for significance)
+## final 5 models to export
 
 ```{r}
-library(dplyr)
-library(purrr)
-library(broom)
-library(sf)
-library(ggplot2)
-library(tigris)
 
-# ── Settings ──────────────────────────────────────────────────────────────────
-aoi_states <- unique(tpu_collapsed$State.Abbreviation)
-min_obs    <- 5
-sig_level  <- 0.10   # threshold for "significant"
-
-# ── Run county-level regressions ──────────────────────────────────────────────
-county_models <- tpu_collapsed %>%
-  arrange(county_id, year) %>%
-  group_by(county_id) %>%
-  filter(n() >= min_obs) %>%
-  group_map(~ {
-    tryCatch(
-      lm(ln_enroll ~ lag(loss_ratio_raw) + lag(DM_mean), data = .x),
-      error = function(e) NULL
-    )
-  }, .keep = TRUE)
-
-county_ids <- tpu_collapsed %>%
-  arrange(county_id, year) %>%
-  group_by(county_id) %>%
-  filter(n() >= min_obs) %>%
-  group_keys() %>%
-  pull(county_id)
-
-# ── Extract coefficients ───────────────────────────────────────────────────────
-county_coefs <- map2_dfr(county_models, county_ids, function(mod, cid) {
-  if (is.null(mod)) return(NULL)
-  tidy(mod) %>%
-    filter(term %in% c("lag(loss_ratio_raw)", "lag(DM_mean)")) %>%
-    mutate(county_id = cid)
-})
-
-# ── Pivot wide: one row per county, one col per coefficient ───────────────────
-county_coefs_wide <- county_coefs %>%
-  select(county_id, term, estimate, p.value) %>%
-  pivot_wider(
-    names_from  = term,
-    values_from = c(estimate, p.value),
-    names_glue  = "{.value}__{term}"
-  ) %>%
-  rename(
-    coef_lr  = `estimate__lag(loss_ratio_raw)`,
-    coef_dm  = `estimate__lag(DM_mean)`,
-    pval_lr  = `p.value__lag(loss_ratio_raw)`,
-    pval_dm  = `p.value__lag(DM_mean)`
-  ) %>%
+#====================================================
+# 0. Prepare basis risk variables
+#====================================================
+tpu_collapsed <- tpu_collapsed %>%
   mutate(
-    sig_lr = pval_lr <= sig_level,
-    sig_dm = pval_dm <= sig_level,
-    # Cap extreme coefficients for color scale readability
-    coef_lr_capped = pmax(pmin(coef_lr, 2),  -2),
-    coef_dm_capped = pmax(pmin(coef_dm, 2),  -2)
-  )
+    basis_risk_d4_ind = ifelse(dm_true_count == 0, 0, missed_payout_rate_d4),
+    any_d4            = as.integer(dm_true_count > 0)
+  ) %>%
+  arrange(county_id, year) %>%
+  group_by(county_id) %>%
+  mutate(
+    lag_loss_ratio_raw    = lag(loss_ratio_raw, 1),
+    lag_DM_mean           = lag(DM_mean, 1),
+    lag_basis_risk_d4_ind = lag(basis_risk_d4_ind, 1),
+    lag_any_d4            = lag(any_d4, 1)
+  ) %>%
+  ungroup()
+#====================================================
+# 1. Run models
+#====================================================
+pid <- ~county_id + year
 
-# ── Join to county shapefile ───────────────────────────────────────────────────
-counties_sf <- counties(cb = TRUE, resolution = "20m", year = 2022) %>%
-  mutate(county_id = paste(as.integer(STATEFP),
-                           as.integer(COUNTYFP), sep = "_")) %>%
-  filter(STUSPS %in% aoi_states) %>%    # or use your own state filter
-  st_transform(4326)
+# ── Model 1: Loss Ratio + DM Mean (baseline) ──────────────────────────────────
+m1_yr <- feols(ln_enroll ~ l(loss_ratio_raw,1) * l(DM_mean,1) | year,
+               data = tpu_collapsed, panel.id = pid)
+m1_st <- feols(ln_enroll ~ l(loss_ratio_raw,1) * l(DM_mean,1) | year + State.Code,
+               data = tpu_collapsed, panel.id = pid)
+m1_co <- feols(ln_enroll ~ l(loss_ratio_raw,1) * l(DM_mean,1) | year + county_id,
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 
-states_sf_bg <- states(cb = TRUE, resolution = "20m", year = 2022) %>%
-  filter(STUSPS %in% aoi_states) %>%
-  st_transform(4326)
+# ── Model 2: Basis Risk + Any D4 ──────────────────────────────────────────────
+m2_yr <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) | year,
+               data = tpu_collapsed, panel.id = pid)
+m2_st <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) | year + State.Code,
+               data = tpu_collapsed, panel.id = pid)
+m2_co <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) | year + county_id,
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 
-map_data <- counties_sf %>%
-  left_join(county_coefs_wide, by = "county_id")
+# ── Model 3: Basis Risk + Any D4 + Loss Ratio ─────────────────────────────────
+m3_yr <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
+                            l(loss_ratio_raw,1) | year,
+               data = tpu_collapsed, panel.id = pid)
+m3_st <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
+                            l(loss_ratio_raw,1) | year + State.Code,
+               data = tpu_collapsed, panel.id = pid)
+m3_co <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
+                            l(loss_ratio_raw,1) | year + county_id,
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 
-# ── Shared theme ──────────────────────────────────────────────────────────────
-map_theme <- theme_void() +
-  theme(
-    plot.title      = element_text(hjust = 0.5, face = "bold", size = 13),
-    plot.subtitle   = element_text(hjust = 0.5, size = 10),
-    legend.title    = element_text(size = 10, face = "bold"),
-    legend.text     = element_text(size = 9),
-    legend.key.size = unit(0.6, "cm"),
-    plot.margin     = margin(5, 5, 5, 5)
-  )
+# ── Model 4: Basis Risk + Any D4 + Drought Intensity ─────────────────────────
+m4_yr <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
+                            l(DM_mean,1) | year,
+               data = tpu_collapsed, panel.id = pid)
+m4_st <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
+                            l(DM_mean,1) | year + State.Code,
+               data = tpu_collapsed, panel.id = pid)
+m4_co <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
+                            l(DM_mean,1) | year + county_id,
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 
-# ── Map 1: Loss ratio coefficient ─────────────────────────────────────────────
-p_map_lr <- ggplot() +
-  # Insignificant counties: faded
-  geom_sf(
-    data = map_data %>% filter(!is.na(coef_lr) & !sig_lr),
-    aes(fill = coef_lr_capped),
-    color = "white", linewidth = 0.1, alpha = 0.25
-  ) +
-  # Significant counties: full color
-  geom_sf(
-    data = map_data %>% filter(!is.na(coef_lr) & sig_lr),
-    aes(fill = coef_lr_capped),
-    color = "white", linewidth = 0.1, alpha = 1.0
-  ) +
-  # Counties with no data: grey
-  geom_sf(
-    data = map_data %>% filter(is.na(coef_lr)),
-    fill = "grey85", color = "white", linewidth = 0.1
-  ) +
-  geom_sf(data = states_sf_bg, fill = NA,
-          color = "black", linewidth = 0.4) +
-  scale_fill_distiller(
-    name     = "Coefficient",
-    palette  = "RdBu",
-    direction = 1,
-    limits   = c(-2, 2),
-    na.value = "grey85"
-  ) +
-  labs(
-    title    = "Effect of Lagged Loss Ratio on Enrollment",
-    subtitle = paste0("Faded = p > ", sig_level,
-                      ";  grey = fewer than ", min_obs, " observations")
-  ) +
-  map_theme
+# ── Model 5: Basis Risk + Any D4 + Loss Ratio + Drought Intensity ─────────────
+m5_yr <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
+                            l(loss_ratio_raw,1) + l(DM_mean,1) | year,
+               data = tpu_collapsed, panel.id = pid)
+m5_st <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
+                            l(loss_ratio_raw,1) + l(DM_mean,1) | year + State.Code,
+               data = tpu_collapsed, panel.id = pid)
+m5_co <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
+                            l(loss_ratio_raw,1) + l(DM_mean,1) | year + county_id,
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 
-# ── Map 2: Drought coefficient ────────────────────────────────────────────────
-p_map_dm <- ggplot() +
-  geom_sf(
-    data = map_data %>% filter(!is.na(coef_dm) & !sig_dm),
-    aes(fill = coef_dm_capped),
-    color = "white", linewidth = 0.1, alpha = 0.25
-  ) +
-  geom_sf(
-    data = map_data %>% filter(!is.na(coef_dm) & sig_dm),
-    aes(fill = coef_dm_capped),
-    color = "white", linewidth = 0.1, alpha = 1.0
-  ) +
-  geom_sf(
-    data = map_data %>% filter(is.na(coef_dm)),
-    fill = "grey85", color = "white", linewidth = 0.1
-  ) +
-  geom_sf(data = states_sf_bg, fill = NA,
-          color = "black", linewidth = 0.4) +
-  scale_fill_distiller(
-    name      = "Coefficient",
-    palette   = "RdBu",
-    direction = 1,
-    limits    = c(-2, 2),
-    na.value  = "grey85"
-  ) +
-  labs(
-    title    = "Effect of Lagged Drought Intensity on Enrollment",
-    subtitle = paste0("Faded = p > ", sig_level,
-                      ";  grey = fewer than ", min_obs, " observations")
-  ) +
-  map_theme
+#====================================================
+# 2. Shared dict
+#====================================================
+reg_dict <- c(
+  "l(loss_ratio_raw, 1)"               = "Lagged Loss Ratio",
+  "l(DM_mean, 1)"                      = "Lagged Drought Intensity",
+  "l(loss_ratio_raw, 1):l(DM_mean, 1)" = "Loss Ratio $\\times$ Drought",
+  "l(basis_risk_d4_ind, 1)"            = "Lagged Basis Risk",
+  "l(any_d4, 1)"                       = "Any D4 (prev. year)"
+)
 
-# ── Export ────────────────────────────────────────────────────────────────────
-library(patchwork)
+#====================================================
+# 3. Export each model to its own .tex file
+#====================================================
+etable(
+  m1_yr, m1_st, m1_co,
+  file         = here("data/outputs/tables/reg_m1_baseline.tex"),
+  tex          = TRUE,
+  label        = "tab:reg_m1",
+  title        = "Model 1: Loss Ratio and Drought Intensity (Baseline)",
+  digits       = 2,
+  digits.stats = 3,
+  dict         = reg_dict,
+  drop         = "%year|%State.Code|%county_id"
+)
 
-p_combined <- p_map_lr / p_map_dm
+etable(
+  m2_yr, m2_st, m2_co,
+  file         = here("data/outputs/tables/reg_m2_basis_risk.tex"),
+  tex          = TRUE,
+  label        = "tab:reg_m2",
+  title        = "Model 2: Basis Risk and Drought Indicator",
+  digits       = 2,
+  digits.stats = 3,
+  dict         = reg_dict,
+  drop         = "%year|%State.Code|%county_id"
+)
 
-png(here("data/outputs/figures/county_coef_maps.png"),
-    width  = 1600,
-    height = 1800,
-    res    = 150)
-plot(p_combined)
+etable(
+  m3_yr, m3_st, m3_co,
+  file         = here("data/outputs/tables/reg_m3_br_lr.tex"),
+  tex          = TRUE,
+  label        = "tab:reg_m3",
+  title        = "Model 3: Basis Risk, Drought Indicator, and Loss Ratio",
+  digits       = 2,
+  digits.stats = 3,
+  dict         = reg_dict,
+  drop         = "%year|%State.Code|%county_id"
+)
+
+etable(
+  m4_yr, m4_st, m4_co,
+  file         = here("data/outputs/tables/reg_m4_br_dm.tex"),
+  tex          = TRUE,
+  label        = "tab:reg_m4",
+  title        = "Model 4: Basis Risk, Drought Indicator, and Drought Intensity",
+  digits       = 2,
+  digits.stats = 3,
+  dict         = reg_dict,
+  drop         = "%year|%State.Code|%county_id"
+)
+
+etable(
+  m5_yr, m5_st, m5_co,
+  file         = here("data/outputs/tables/reg_m5_full.tex"),
+  tex          = TRUE,
+  label        = "tab:reg_m5",
+  title        = "Model 5: Basis Risk, Drought Indicator, Loss Ratio, and Drought Intensity",
+  digits       = 2,
+  digits.stats = 3,
+  dict         = reg_dict,
+  drop         = "%year|%State.Code|%county_id"
+)
+
+#====================================================
+# 4. Export all to single PDF for review
+#====================================================
+txt_file <- here("data/outputs/tables/regression_main.txt")
+pdf_file <- here("data/outputs/tables/regression_main.pdf")
+
+sink(txt_file)
+
+cat("========================================\n")
+cat("Model 1: Loss Ratio + DM Mean (Baseline)\n")
+cat("========================================\n")
+etable(m1_yr, m1_st, m1_co, digits = 2, digits.stats = 3,
+       dict = reg_dict, drop = "%year|%State.Code|%county_id")
+
+cat("\n========================================\n")
+cat("Model 2: Basis Risk + Any D4\n")
+cat("========================================\n")
+etable(m2_yr, m2_st, m2_co, digits = 2, digits.stats = 3,
+       dict = reg_dict, drop = "%year|%State.Code|%county_id")
+
+cat("\n========================================\n")
+cat("Model 3: Basis Risk + Any D4 + Loss Ratio\n")
+cat("========================================\n")
+etable(m3_yr, m3_st, m3_co, digits = 2, digits.stats = 3,
+       dict = reg_dict, drop = "%year|%State.Code|%county_id")
+
+cat("\n========================================\n")
+cat("Model 4: Basis Risk + Any D4 + Drought Intensity\n")
+cat("========================================\n")
+etable(m4_yr, m4_st, m4_co, digits = 2, digits.stats = 3,
+       dict = reg_dict, drop = "%year|%State.Code|%county_id")
+
+cat("\n========================================\n")
+cat("Model 5: Basis Risk + Any D4 + Loss Ratio + Drought Intensity\n")
+cat("========================================\n")
+etable(m5_yr, m5_st, m5_co, digits = 2, digits.stats = 3,
+       dict = reg_dict, drop = "%year|%State.Code|%county_id")
+
+sink()
+
+pdf(pdf_file, width = 14, height = 10)
+par(mar = c(0, 0, 0, 0), family = "mono")
+
+lines_all      <- readLines(txt_file)
+lines_per_page <- 55
+n_pages        <- ceiling(length(lines_all) / lines_per_page)
+
+for (pg in seq_len(n_pages)) {
+  start_line <- (pg - 1) * lines_per_page + 1
+  end_line   <- min(pg * lines_per_page, length(lines_all))
+  page_lines <- lines_all[start_line:end_line]
+  plot.new()
+  text(0, 1, paste(page_lines, collapse = "\n"),
+       adj = c(0, 1), cex = 0.6, family = "mono")
+}
+
 dev.off()
+
+message("PDF exported to: ", pdf_file)
 ```
 
-
-## maps (non-faded) that do not consider signficance of coefficients
+## create estimation sample df (that excludes removed observations), and exporting descriptive stats
 
 ```{r}
-p_map_lr_nosig <- ggplot() +
-  geom_sf(
-    data = map_data %>% filter(!is.na(coef_lr)),
-    aes(fill = coef_lr_capped),
-    color = "white", linewidth = 0.1
-  ) +
-  geom_sf(
-    data = map_data %>% filter(is.na(coef_lr)),
-    fill = "grey85", color = "white", linewidth = 0.1
-  ) +
-  geom_sf(data = states_sf_bg, fill = NA,
-          color = "black", linewidth = 0.4) +
-  scale_fill_distiller(
-    name      = "Coefficient",
-    palette   = "RdBu",
-    direction = 1,
-    limits    = c(-2, 2),
-    na.value  = "grey85"
-  ) +
-  labs(
-    title    = "Effect of Lagged Loss Ratio on Enrollment",
-    subtitle = paste0("Grey = fewer than ", min_obs, " observations")
-  ) +
-  map_theme
+estimation_sample <- tpu_collapsed[m5_co$obs_selection$obsRemoved, ]
 
-p_map_dm_nosig <- ggplot() +
-  geom_sf(
-    data = map_data %>% filter(!is.na(coef_dm)),
-    aes(fill = coef_dm_capped),
-    color = "white", linewidth = 0.1
-  ) +
-  geom_sf(
-    data = map_data %>% filter(is.na(coef_dm)),
-    fill = "grey85", color = "white", linewidth = 0.1
-  ) +
-  geom_sf(data = states_sf_bg, fill = NA,
-          color = "black", linewidth = 0.4) +
-  scale_fill_distiller(
-    name      = "Coefficient",
-    palette   = "RdBu",
-    direction = 1,
-    limits    = c(-2, 2),
-    na.value  = "grey85"
-  ) +
-  labs(
-    title    = "Effect of Lagged Drought Intensity on Enrollment",
-    subtitle = paste0("Grey = fewer than ", min_obs, " observations")
-  ) +
-  map_theme
+# Verify
+nrow(estimation_sample) == nobs(m5_co)  # should be TRUE
 
-# ── Export ────────────────────────────────────────────────────────────────────
-p_combined_nosig <- p_map_lr_nosig / p_map_dm_nosig
+#====================================================
+# Function: export_desc_stats_latex
+#====================================================
+# vars_spec: a list of lists, each with:
+#   - col:   column name in df
+#   - label: bold label text e.g. "Acreage enrolled"
+#   - units: units string e.g. "acres" (or NULL)
+#   - comment: TRUE/FALSE to comment out the row (default FALSE)
 
-png(here("data/outputs/figures/county_coef_maps_nosig.png"),
-    width  = 1600,
-    height = 1800,
-    res    = 150)
-plot(p_combined_nosig)
-dev.off()
+export_desc_stats_latex <- function(df, vars_spec, file_path,
+                                    caption = NULL, label = "tab:desc_stats") {
+
+  # ── Format numbers ──────────────────────────────────────────────────────────
+  fmt_num <- function(x) {
+    if (is.na(x)) return("--")
+    if (abs(x) >= 1000) {
+      formatC(x, format = "f", digits = 0, big.mark = ",")
+    } else if (abs(x) >= 10) {
+      formatC(x, format = "f", digits = 1, big.mark = ",")
+    } else {
+      formatC(x, format = "f", digits = 2, big.mark = ",")
+    }
+  }
+
+  # ── Build each row ──────────────────────────────────────────────────────────
+  rows <- lapply(vars_spec, function(v) {
+
+    col     <- v$col
+    label_v <- v$label
+    units   <- if (!is.null(v$units)) v$units else NULL
+    comment <- if (!is.null(v$comment) && v$comment) "%" else ""
+
+    vals <- df[[col]]
+    vals_clean <- vals[!is.na(vals)]
+
+    mean_v <- fmt_num(mean(vals_clean))
+    sd_v   <- fmt_num(sd(vals_clean))
+    min_v  <- fmt_num(min(vals_clean))
+    max_v  <- fmt_num(max(vals_clean))
+    n_v    <- formatC(length(vals_clean), format = "d", big.mark = ",")
+
+    # Variable label cell
+    if (!is.null(units)) {
+      var_cell <- paste0("\\textbf{", label_v, "} (", units, ")")
+    } else {
+      var_cell <- paste0("\\textbf{", label_v, "}")
+    }
+
+    row_str <- paste0(
+      comment,
+      var_cell, " & ", mean_v, " & ", sd_v, " & ",
+      min_v, " & ", max_v, " & ", n_v, " \\\\"
+    )
+
+    row_str
+  })
+
+  body_rows <- paste(unlist(rows), collapse = "\n")
+
+  # ── Caption ─────────────────────────────────────────────────────────────────
+  caption_txt <- if (is.null(caption)) "" else caption
+
+  # ── Full table ──────────────────────────────────────────────────────────────
+  latex <- paste0(
+"\\small
+\\begin{table}[htbp]
+\\centering
+\\begin{tabular}{p{8.5cm}rrrrr}
+\\toprule
+\\textbf{Variable} & Mean & Std.\\ Dev. & Min & Max & N \\\\
+\\midrule
+", body_rows, "
+\\bottomrule
+\\end{tabular}
+\\caption{", caption_txt, "}
+\\label{", label, "}
+\\end{table}
+\\normalsize"
+  )
+
+  writeLines(latex, file_path)
+  message("Exported: ", file_path)
+}
+
+#====================================================
+# Example usage
+#====================================================
+
+
+
+vars_spec <- list(
+  list(col = "Net.Reporting.Level.Amount", label = "PRF-RI enrollment",         units = "acres"),
+  list(col = "lag_basis_risk_d4_ind",      label = "Basis risk (lagged)",        units = "missed payout rate"),
+  list(col = "lag_any_d4",                 label = "Any D4 drought (lagged)",    units = "binary"),
+  list(col = "lag_loss_ratio_raw",         label = "Loss ratio (lagged)",        units = "indemnities/premia"),
+  list(col = "lag_DM_mean",                label = "Drought intensity (lagged)", units = "mean DM")
+)
+
+
+
+export_desc_stats_latex(
+  df        = estimation_sample,
+  vars_spec = vars_spec,
+  file_path = here("data/outputs/tables/desc_stats_regression.tex"),
+  caption   = "Descriptive statistics for regression variables. Each observation is a unique county-year with non-zero enrollment",
+  label     = "tab:desc_stats"
+)
+
 ```
+
+
+
+
+## counting dropped zeroes
+
+```{r}
+
+# Observations in tpu_collapsed
+nrow(tpu_collapsed)
+
+# Observations actually used in a model
+nobs(m5_st)
+
+# Difference
+nrow(tpu_collapsed) - nobs(m5_st)
+
+```
+
+
+
+
+## VIF scores for variable collinearity
+
+```{r}
+library(car)
+
+# ── VIF for Model 1 (baseline) ────────────────────────────────────────────────
+m_vif_m1 <- lm(ln_enroll ~ lag(loss_ratio_raw) + lag(DM_mean),
+               data = tpu_collapsed)
+
+cat("=== Model 1: Loss Ratio * DM Mean ===\n")
+vif(m_vif_m1)
+
+# ── VIF for Model 2 (basis risk + any_d4) ─────────────────────────────────────
+m_vif_m2 <- lm(ln_enroll ~ lag(basis_risk_d4_ind) + lag(any_d4),
+               data = tpu_collapsed)
+
+cat("\n=== Model 2: Basis Risk + Any D4 ===\n")
+vif(m_vif_m2)
+
+# ── VIF for Model 3 (basis risk + any_d4 + loss ratio) ────────────────────────
+m_vif_m3 <- lm(ln_enroll ~ lag(basis_risk_d4_ind) + lag(any_d4) +
+                            lag(loss_ratio_raw),
+               data = tpu_collapsed)
+
+cat("\n=== Model 3: Basis Risk + Any D4 + Loss Ratio ===\n")
+vif(m_vif_m3)
+
+# ── VIF for Model 4 (basis risk + any_d4 + drought intensity) ─────────────────
+m_vif_m4 <- lm(ln_enroll ~ lag(basis_risk_d4_ind) + lag(any_d4) +
+                            lag(DM_mean),
+               data = tpu_collapsed)
+
+cat("\n=== Model 4: Basis Risk + Any D4 + Drought Intensity ===\n")
+vif(m_vif_m4)
+
+# ── VIF for Model 5 (full) ────────────────────────────────────────────────────
+m_vif_m5 <- lm(ln_enroll ~ lag(basis_risk_d4_ind) + lag(any_d4) +
+                            lag(loss_ratio_raw) + lag(DM_mean),
+               data = tpu_collapsed)
+
+cat("\n=== Model 5: Basis Risk + Any D4 + Loss Ratio + Drought Intensity ===\n")
+vif(m_vif_m5)
+```
+
+
+
+
+
+## diagnostics - covariance
+
+```{r}
+# Covariance and correlation between basis risk and loss ratio
+cor_check <- tpu_collapsed %>%
+  select(basis_risk_d4_ind, loss_ratio_raw, any_d4, DM_mean) %>%
+  filter(complete.cases(.))
+
+cat("=== Correlation matrix ===\n")
+round(cor(cor_check), 3)
+
+cat("\n=== Covariance matrix ===\n")
+round(cov(cor_check), 4)
+
+# Also check lagged versions since that's what enters the regression
+cor_check_lag <- tpu_collapsed %>%
+  arrange(county_id, year) %>%
+  group_by(county_id) %>%
+  mutate(
+    lag_basis_risk = lag(basis_risk_d4_ind),
+    lag_loss_ratio = lag(loss_ratio_raw),
+    lag_any_d4     = lag(any_d4),
+    lag_DM_mean    = lag(DM_mean)
+  ) %>%
+  ungroup() %>%
+  select(lag_basis_risk, lag_loss_ratio, lag_any_d4, lag_DM_mean) %>%
+  filter(complete.cases(.))
+
+cat("\n=== Correlation matrix (lagged variables) ===\n")
+round(cor(cor_check_lag), 3)
+
+
+```
+
+## diagnostics - within county variance
+
+```{r}
+# Within-county variance for basis risk and loss ratio
+within_var <- tpu_collapsed %>%
+  arrange(county_id, year) %>%
+  group_by(county_id) %>%
+  mutate(
+    basis_risk_demean = basis_risk_d4_ind - mean(basis_risk_d4_ind, na.rm = TRUE),
+    loss_ratio_demean = loss_ratio_raw    - mean(loss_ratio_raw,    na.rm = TRUE),
+    any_d4_demean     = any_d4            - mean(any_d4,            na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+cat("=== Total variance ===\n")
+cat("Basis risk:  ", round(var(tpu_collapsed$basis_risk_d4_ind, na.rm = TRUE), 4), "\n")
+cat("Loss ratio:  ", round(var(tpu_collapsed$loss_ratio_raw,    na.rm = TRUE), 4), "\n")
+cat("Any D4:      ", round(var(tpu_collapsed$any_d4,            na.rm = TRUE), 4), "\n")
+
+cat("\n=== Within-county variance (after demeaning) ===\n")
+cat("Basis risk:  ", round(var(within_var$basis_risk_demean, na.rm = TRUE), 4), "\n")
+cat("Loss ratio:  ", round(var(within_var$loss_ratio_demean, na.rm = TRUE), 4), "\n")
+cat("Any D4:      ", round(var(within_var$any_d4_demean,     na.rm = TRUE), 4), "\n")
+
+cat("\n=== Within-county as % of total variance ===\n")
+cat("Basis risk:  ", round(100 * var(within_var$basis_risk_demean, na.rm = TRUE) /
+                           var(tpu_collapsed$basis_risk_d4_ind,    na.rm = TRUE), 1), "%\n")
+cat("Loss ratio:  ", round(100 * var(within_var$loss_ratio_demean, na.rm = TRUE) /
+                           var(tpu_collapsed$loss_ratio_raw,        na.rm = TRUE), 1), "%\n")
+cat("Any D4:      ", round(100 * var(within_var$any_d4_demean,     na.rm = TRUE) /
+                           var(tpu_collapsed$any_d4,                na.rm = TRUE), 1), "%\n")
+```
+
 

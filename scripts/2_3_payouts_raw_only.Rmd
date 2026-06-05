@@ -305,7 +305,183 @@ save(tpu_collapsed, file = here("data/outputs/tpu_collapsed.rda"))
 ```
 
 
+### missed payout (basis risk) variables
 
+```{r}
+
+# Create empty vectors
+missed_payout_count_all  <- numeric(nrow(tpu_collapsed))  # count of D4 & no payout intervals
+missed_payout_rate_all   <- numeric(nrow(tpu_collapsed))  # % of ALL intervals with D4 & no payout
+dm_true_count  <- numeric(nrow(tpu_collapsed))  # count of D4 intervals
+missed_payout_rate_d4    <- numeric(nrow(tpu_collapsed))  # % of D4 intervals with no payout
+
+for (i in seq_len(nrow(tpu_collapsed))) {
+  if(i %% 1000 == 0) print(i)
+
+  county <- tpu_collapsed$County.Code[i]
+  state  <- tpu_collapsed$State.Code[i]
+  year   <- tpu_collapsed$year[i]
+
+  # Filter county areas
+  area_rows <- cpc_county_areas %>%
+    filter(State.Code == state) %>%
+    filter(County.Code == county)
+
+  if (nrow(area_rows) == 0) {
+    missed_payout_count_all[i] <- NA
+    missed_payout_rate_all[i]  <- NA
+    dm_true_count[i]    <- NA
+    missed_payout_rate_d4[i]   <- NA
+    next
+  }
+
+  grid_codes  <- unique(area_rows$CPC.Grid.Code)
+  county_rows <- grids[grids$GRIDCODE %in% grid_codes, ] %>% st_drop_geometry()
+
+  # Column patterns for this year
+  pattern_DM <- paste0("^DM_median_", year, "_6(2[5-9]|3[0-5])$")
+  pattern_RI <- paste0("^cpc_index_", year, "_6(2[5-9]|3[0-5])$")
+
+  dm_cols <- grep(pattern_DM, names(county_rows), value = TRUE)
+  ri_cols <- grep(pattern_RI, names(county_rows), value = TRUE)
+
+  # Align columns (same intervals)
+  # Extract interval suffix and match
+  dm_intervals <- gsub(".*_(6[0-9]{2})$", "\\1", dm_cols)
+  ri_intervals <- gsub(".*_(6[0-9]{2})$", "\\1", ri_cols)
+  common_intervals <- base::intersect(dm_intervals, ri_intervals)
+
+  dm_cols_use <- paste0("DM_median_", year, "_", common_intervals)
+  ri_cols_use <- paste0("cpc_index_", year, "_", common_intervals)
+
+  dm_mat <- as.matrix(county_rows[, dm_cols_use, drop = FALSE])
+  ri_mat <- as.matrix(county_rows[, ri_cols_use, drop = FALSE])
+
+  # Total valid intervals
+  valid_mat <- !is.na(dm_mat) & !is.na(ri_mat)
+  total_valid <- sum(valid_mat)
+
+  if (total_valid == 0) {
+    missed_payout_count_all[i] <- NA
+    missed_payout_rate_all[i]  <- NA
+    dm_true_count[i]    <- NA
+    missed_payout_rate_d4[i]   <- NA
+    next
+  }
+
+  # D4 intervals
+  is_d4      <- dm_mat >= high_drought_threshold & valid_mat
+  # Missed payout: D4 but RI > threshold (no payout)
+  is_missed  <- is_d4 & ri_mat > ri_threshold
+
+  n_d4       <- sum(is_d4,     na.rm = TRUE)
+  n_missed   <- sum(is_missed, na.rm = TRUE)
+
+  missed_payout_count_all[i] <- n_missed
+  missed_payout_rate_all[i]  <- n_missed / total_valid          # % of ALL intervals
+  dm_true_count[i]    <- n_d4
+  missed_payout_rate_d4[i]   <- ifelse(n_d4 > 0,
+                                        n_missed / n_d4,        # % of D4 intervals
+                                        NA)
+}
+
+tpu_collapsed$missed_payout_count_all <- missed_payout_count_all
+tpu_collapsed$missed_payout_rate_all  <- missed_payout_rate_all
+tpu_collapsed$dm_true_count    <- dm_true_count
+tpu_collapsed$missed_payout_rate_d4   <- missed_payout_rate_d4
+
+save(tpu_collapsed, file = here("data/outputs/tpu_collapsed.rda"))
+
+```
+
+## spot-check
+
+```{r}
+# # ── Spot check: 2016, State 6, County 29 ─────────────────────────────────────
+# check_year   <- 2016
+# check_state  <- 6
+# check_county <- 29
+# 
+# # Step 1: Get grid codes for this county
+# area_rows_check <- cpc_county_areas %>%
+#   filter(State.Code == check_state) %>%
+#   filter(County.Code == check_county)
+# 
+# cat("Number of area rows:", nrow(area_rows_check), "\n")
+# 
+# grid_codes_check <- unique(area_rows_check$CPC.Grid.Code)
+# cat("Number of unique grid codes:", length(grid_codes_check), "\n")
+# 
+# # Step 2: Get grid rows
+# county_rows_check <- grids[grids$GRIDCODE %in% grid_codes_check, ] %>%
+#   st_drop_geometry()
+# 
+# cat("Number of grid rows:", nrow(county_rows_check), "\n")
+# 
+# # Step 3: Get DM and RI columns for this year
+# dm_cols_check <- grep(paste0("^DM_median_", check_year, "_6(2[5-9]|3[0-5])$"),
+#                       names(county_rows_check), value = TRUE)
+# ri_cols_check <- grep(paste0("^cpc_index_", check_year, "_6(2[5-9]|3[0-5])$"),
+#                       names(county_rows_check), value = TRUE)
+# 
+# cat("\nDM columns found:", dm_cols_check, "\n")
+# cat("RI columns found:", ri_cols_check, "\n")
+# 
+# # Step 4: Build matrices
+# dm_mat_check <- as.matrix(county_rows_check[, dm_cols_check, drop = FALSE])
+# ri_mat_check <- as.matrix(county_rows_check[, ri_cols_check, drop = FALSE])
+# 
+# cat("\nDimensions of DM matrix:", dim(dm_mat_check), "\n")
+# cat("Dimensions of RI matrix:", dim(ri_mat_check), "\n")
+# 
+# # Step 5: Compute statistics manually
+# valid_check   <- !is.na(dm_mat_check) & !is.na(ri_mat_check)
+# total_valid   <- sum(valid_check)
+# is_d4_check   <- dm_mat_check >= high_drought_threshold & valid_check
+# is_missed_check <- is_d4_check & ri_mat_check > ri_threshold
+# 
+# n_d4_check     <- sum(is_d4_check,     na.rm = TRUE)
+# n_missed_check <- sum(is_missed_check, na.rm = TRUE)
+# 
+# cat("\n=== Spot Check Results: Year", check_year,
+#     "| State", check_state,
+#     "| County", check_county, "===\n")
+# cat("Total valid intervals:          ", total_valid, "\n")
+# cat("D4 intervals:                   ", n_d4_check, "\n")
+# cat("Missed payout intervals:        ", n_missed_check, "\n")
+# cat("missed_payout_rate_all:         ", round(n_missed_check / total_valid, 4), "\n")
+# cat("missed_payout_rate_d4:          ",
+#     ifelse(n_d4_check > 0, round(n_missed_check / n_d4_check, 4), NA), "\n")
+# 
+# # Step 6: Compare to stored values
+# stored <- tpu_collapsed %>%
+#   filter(year == check_year,
+#          State.Code == check_state,
+#          County.Code == check_county)
+# 
+# cat("\n=== Stored values in tpu_collapsed ===\n")
+# cat("missed_payout_count_all:  ", stored$missed_payout_count_all, "\n")
+# cat("missed_payout_rate_all:   ", stored$missed_payout_rate_all,  "\n")
+# cat("dm_true_count:     ", stored$dm_true_count,    "\n")
+# cat("missed_payout_rate_d4:    ", stored$missed_payout_rate_d4,   "\n")
+# 
+# # Step 7: Show raw values for inspection
+# cat("\n=== Raw DM values by interval ===\n")
+# dm_summary <- data.frame(
+#   interval   = dm_cols_check,
+#   mean_DM    = colMeans(dm_mat_check, na.rm = TRUE),
+#   pct_D4     = colMeans(dm_mat_check >= high_drought_threshold, na.rm = TRUE)
+# )
+# print(dm_summary)
+# 
+# cat("\n=== Raw RI values by interval ===\n")
+# ri_summary <- data.frame(
+#   interval      = ri_cols_check,
+#   mean_RI       = colMeans(ri_mat_check, na.rm = TRUE),
+#   pct_payout    = colMeans(ri_mat_check <= ri_threshold, na.rm = TRUE)
+# )
+# print(ri_summary)
+```
 
 
 ### join relevant SOB columns (Policies Earning Premium Count, Units Earning Premium Count)

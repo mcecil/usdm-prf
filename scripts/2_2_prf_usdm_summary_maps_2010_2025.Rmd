@@ -26,6 +26,7 @@ library(stringr)
 library(tidyr)
 library(gt)
 library(purrr)
+library(patchwork)
 
 
 conflicted::conflict_prefer("select", "dplyr")
@@ -422,6 +423,79 @@ p_usdm
 
 
 ```
+
+## updates to maps
+```{r}
+
+# Define AOI states
+aoi_states <- c("CA", "NV", "AZ", "NM", "CO", "UT", "TX", "OK", "KS")
+
+# Dissolve AOI states into a single boundary
+aoi_dissolved <- states_map %>% 
+  filter(STUSPS %in% aoi_states) %>% 
+  st_union()
+
+aoi_dissolved_usdm <- states %>% 
+  filter(STUSPS %in% aoi_states) %>% 
+  st_union()
+
+p_prf_acres <- ggplot() +
+  geom_sf(data = states_map, aes(fill = acres_bin), color = "black", linewidth = 0.2) +
+  geom_sf(data = aoi_dissolved, fill = NA, color = "black", linewidth = 0.8) +
+  scale_fill_viridis_d(
+    name = "Total PRF Acres",
+    option = "C",
+    direction = -1,
+    na.value = "white"
+  ) +
+  labs(
+    title = "Total PRF Enrollment Acres by State",
+    subtitle = "2010–2025",
+    caption = "Source: RMA Summary of Business"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background  = element_rect(fill = "white", color = NA),
+    legend.position = "right",
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+p_usdm <- ggplot() +
+  geom_sf(data = grid, aes(fill = D4_percent), color = NA) +
+  geom_sf(data = states, fill = NA, color = "black", linewidth = 0.3) +
+  geom_sf(data = aoi_dissolved_usdm, fill = NA, color = "black", linewidth = 0.8) +
+  scale_fill_viridis_c(
+    name = "% Time in D4",
+    option = "C",
+    direction = -1,
+    na.value = "white"
+  ) +
+  labs(
+    title = "Percent of Time in Exceptional Drought (D4)",
+    subtitle = "2010–2025",
+    caption = "Source: U.S. Drought Monitor"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background  = element_rect(fill = "white", color = NA),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+p_prf_acres + p_usdm   # side-by-side
+
+
+
+
+```
+
+
+
 
 ```{r}
 

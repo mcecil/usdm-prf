@@ -252,15 +252,21 @@ p_crosstab <- ggplot() +
   geom_sf(data = states_aoi, fill = NA, color = "black", linewidth = 0.5) +
   scale_fill_manual(
     values = combo_colors,
-    name = "Drought / Payout Classification"
+    name = NULL
   ) +
-  labs(title = "Crosstab Map : DM = 4 vs RI ≤ 0.9 July–August 2022") +
+  labs(title = "Crosstab Map : DM = 4 vs RI ≤ 0.9, July–August 2022") +
   theme_minimal() +
+  guides(
+    fill = guide_legend(nrow = 2)
+  ) +
   theme(
-    legend.position = "right",
-    plot.title = element_text(hjust = 0.5),
-    legend.title = element_text(size = 10),
-    legend.text = element_text(size = 9)
+    legend.position  = "bottom",
+    plot.title       = element_text(hjust = 0.5, size = 20),
+    legend.text      = element_text(size = 20),
+    legend.key.size  = unit(1.5, "lines"),
+    axis.text.x      = element_blank(),
+    axis.text.y      = element_blank(),
+    axis.ticks       = element_blank()
   )
 
 p_crosstab
