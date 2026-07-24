@@ -11,27 +11,8 @@ knitr::opts_chunk$set(echo = TRUE)
 ## load required libraries
 
 ```{r}
-
-library(dplyr) 
-library(here)
-library(sf)
-library(raster)
-library(conflicted)
-library(rlang)
-library(scico)
-library(ggpubr)
-library(assertthat)
-library(ggplot2)
-library(stringr)
-library(tidyr)
-library(gt)
-library(viridis)
-library(scales)
-conflicted::conflict_prefer("select", "dplyr")
-conflicted::conflict_prefer("filter", "dplyr")
-options(max.print = 10000)
+source(here::here("_setup.R"))
 ```
-
 
 
 ## initial plots
@@ -44,104 +25,13 @@ load(here("data/outputs/grids_usdm_stats.rda"))
 
 grids <- grids %>% filter(!is.na(cpc_index_2010_625)) %>% filter(!(is.na(DM_median_2010_625)))
 
-ri_threshold <- 0.9
-high_drought_threshold <- 4
-high_drought_label <-"D4"
-
-start_year <- 2010
-end_year <- 2025
-
-aoi_states <- c("CA", "NV", "AZ", "NM", "CO", "UT", "TX", "OK", "KS")
-
-interval_start_months <- 1:11
-names(interval_start_months) <- 625:635
-
-interval_end_months <- 2:12
-names(interval_end_months) <- 625:635
 
 ```
 
-## function for exporting tables
-
-```{r}
-
-export_df_to_latex <- function(df, file_path, caption = NULL) {
-  
-  #-----------------------------
-  # Helper: escape LaTeX specials
-  #-----------------------------
-  escape_latex <- function(x) {
-    x <- gsub("\\\\", "\\\\textbackslash{}", x)
-    x <- gsub("([%&_#\\$])", "\\\\\\1", x)
-    x <- gsub("_", "\\\\_", x)
-    return(x)
-  }
-  
-  # Convert to character
-  df[] <- lapply(df, as.character)
-  
-  # Escape LaTeX characters
-  df[] <- lapply(df, escape_latex)
-  colnames(df) <- escape_latex(colnames(df))
-  
-  # Alignment: first left, rest right
-  n_cols <- ncol(df)
-  align_string <- paste0("l", paste(rep("r", n_cols - 1), collapse = ""))
-  
-  # Build body rows
-  body_rows <- apply(df, 1, function(row) {
-    paste(row, collapse = " & ")
-  })
-  
-  body_rows <- paste0(body_rows, " \\\\")
-  body_text <- paste(body_rows, collapse = "\n")
-  
-  # Header row
-  header <- paste(colnames(df), collapse = " & ")
-  header <- paste0(header, " \\\\")
-  
-  # Caption + label handling
-  file_name <- tools::file_path_sans_ext(basename(file_path))
-  
-  if (is.null(caption)) {
-    caption_text <- gsub("_", " ", file_name)
-  } else {
-    caption_text <- caption
-  }
-  
-  label <- paste0("tab:", file_name)
-  
-  # Build LaTeX table
-  latex_table <- paste0(
-"\\begin{table}[t]
-\\centering
-\\fontsize{12pt}{14pt}\\selectfont
-\\begin{tabular}{@{\\extracolsep{\\fill}}", align_string, "}
-\\toprule
-", header, "
-\\midrule\\addlinespace[2.5pt]
-", body_text, "
-\\bottomrule
-\\end{tabular}
-\\caption{", caption_text, "}
-\\label{", label, "}
-\\end{table}"
-  )
-  
-  # Write file
-  writeLines(latex_table, file_path)
-  
-  message("LaTeX table exported to: ", file_path)
-}
-
-
-
-```
 
 ## heatmap DM = 4
 
 ```{r}
-
 
 
 # Step 1: Long format
@@ -303,11 +193,6 @@ dev.off()
 ## heatmap RI
 ```{r}
 
-library(dplyr)
-library(tidyr)
-library(ggplot2)
-library(viridis)
-library(here)
 
 #-----------------------------
 # 1. Long format RI
@@ -459,12 +344,10 @@ plot(p_heatmap_ri)
 dev.off()
 
 
-
 ```
 
 ```{r}
 
-library(patchwork)
 
 png(here("data/outputs/figures/heatmaps_both.png"),
          width = 1000,
@@ -473,12 +356,5 @@ plot(p_heatmap_dm + p_heatmap_ri)
 dev.off()
 
 
-
-
-
-
-
-
 ```
-
 

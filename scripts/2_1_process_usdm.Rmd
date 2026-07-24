@@ -145,8 +145,6 @@ for (year in years) {
   }
 }
 
-save(grids, file = here("data/grids_usdm"))
-
 rm(grids_joined, grids_pt)
 
 ```

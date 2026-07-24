@@ -1,0 +1,227 @@
+---
+title: "PRF-USDM - county-grid area weights and raw TPU (no simulation)"
+author: Michael Cecil
+output: html_notebook
+---
+
+This notebook computes county-to-grid area proportions (cpc_county_areas.rda)
+and saves the raw PRF-Grazing TPU records per year (tpu_Grazing_<year>_no_sim.rda)
+using the county SOB numbers. It does NOT run the per-grid payout simulation
+(that approach was superseded; see the archived 1_3_payout_calculations.Rmd).
+
+## load required libraries
+
+```{r}
+
+library(dplyr)
+library(here)
+library(sf)
+library(raster)
+library(conflicted)
+library(rlang)
+library(scico)
+library(ggpubr)
+library(assertthat)
+library(ggplot2)
+library(tigris)
+
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+options(max.print = 10000)
+```
+
+## Inputs
+
+```{r}
+
+start_year_payouts <- 2010
+end_year_payouts <- 2025
+
+```
+
+
+## Payouts
+
+First determine payouts for given inputs (year, grid, interval, coverage level, productivity factor, grazing/haying, )
+
+Assumptions made:
+- constant productivity factor of 1
+- rates are constant across years
+- rates are consistent despite changing temporal baseline or spatial resolution
+- acreage proportionally split among cells in county
+- liability, premia, payouts calculated based on acreage for each interval
+
+Equations used:
+Dollar Amount of Insurance Per Acre = County-Base Value * Productivity Factor (also = Liability per Acre?)
+Liability = Dollar Amount * # Acres
+Premium per acre = Liability per acre * rate 
+Payment factor = (trigger_threshold - RI)/trigger_threshold
+Indemnity = Liability * payment factor 
+
+Columns to add
+CHIRPS data set
+- rates, 
+- payment factor for each interval x year
+
+
+## load rates data, join to grids_intersecting
+
+Note - the rates files have a funny format. They are actually downloading two pieces of information. The Premium.Rate is based on the coverage level (70%, 75% ... 90% etc), while the County.Base.Value is based on the use type (Grazing, Haying non irrigated etc).
+
+We will just be focusing on Grazing for now as that is the largest use case. 
+
+```{r}
+
+load(file = paste0(here("data/outputs/grids_intersecting.rda")))
+
+## get state names in usable vector
+states <- unique(grids_intersecting$STATE)
+full_names <- state.name[match(states, state.abb)]
+lower_hyphen_names <- gsub(" ", "-", tolower(full_names)) # Convert to lowercase + hyphenated
+
+
+
+
+```
+
+## create CPC area proportion files
+output table has columns "State.Code"     "County.Code"    "CPC.Grid.Code"  "Area"           "Proportion"    
+
+```{r}
+
+## download counties from tigris
+state_fips <- fips_codes %>%   # built into tigris
+  filter(state %in% states) %>%
+  distinct(state, state_code)
+
+# --- Pinned county boundaries (reproducibility) -------------------------------
+# These counties feed the county-grid area weights (cpc_county_areas), which
+# flow into the enrollment panel. tigris::counties() is a web download whose
+# geometry can vary between runs, so we pin it: download once, save in the repo,
+# load the pinned copy thereafter. Delete the .rda to refresh deliberately.
+counties_path <- here("data/boundaries/counties_cb_2022.rda")
+
+if (file.exists(counties_path)) {
+  load(counties_path)                        # loads `counties_sf`
+} else {
+  counties_sf <- counties(
+    state = states,
+    cb = TRUE,      # cartographic boundary (simpler, faster)
+    year = 2022
+  )
+  dir.create(dirname(counties_path), recursive = TRUE, showWarnings = FALSE)
+  save(counties_sf, file = counties_path)
+  message("Downloaded and pinned county boundaries to: ", counties_path)
+}
+
+aea_crs <- 5070  # US Albers Equal Area
+
+counties_sf <- st_transform(counties_sf, aea_crs)
+grids_sf    <- st_transform(grids_intersecting, aea_crs)
+
+county_grid_intersections <- st_intersection(
+  counties_sf,
+  grids_sf
+)
+
+county_grid_intersections <- county_grid_intersections %>%
+  mutate(
+    Area = as.numeric(st_area(geometry))
+  )
+
+area_table <- county_grid_intersections %>%
+  group_by(STATEFP, COUNTYFP) %>%
+  mutate(
+    Proportion = Area / sum(Area)
+  ) %>%
+  ungroup()
+
+cpc_county_areas <- area_table %>%
+  mutate(
+    # ---- Your requested schema ----
+    State.Code    = as.numeric(STATEFP),  # numeric state FIPS
+    State         = STUSPS,               # TX, ND, etc.
+    County.Code   = COUNTYFP,             # 3-digit county FIPS
+    CPC.Grid.Code = GRIDCODE
+  ) %>%
+  st_drop_geometry() %>%
+  select(
+    State.Code,
+    State,
+    County.Code,
+    CPC.Grid.Code,
+    Area,
+    Proportion
+  )
+
+cpc_county_areas$County.Code <- as.numeric(cpc_county_areas$County.Code)
+
+
+save(cpc_county_areas, file = here("data/outputs/cpc_county_areas.rda"))
+
+```
+
+## validation check
+
+```{r}
+sums_by_county <- cpc_county_areas %>%
+  group_by(State.Code, County.Code) %>%
+  summarise(sum_prop = sum(Proportion))
+
+```
+
+
+## save raw (no-sim) TPU files, one per year
+## These are the filtered PRF-Grazing TPU records with raw SOB columns only
+## (no simulated payouts). Downstream, 2_3 stacks these into tpu_all_years and
+## collapses to a county-year panel using the raw SOB fields.
+## Filters mirror payment_calcs() in the full 1_3 script, minus the simulation.
+
+```{r}
+
+payouts_outputs_folder <- here("data/outputs/payouts")
+
+if (!dir.exists(payouts_outputs_folder)) {
+  dir.create(payouts_outputs_folder, recursive = TRUE)
+}
+
+for (year in start_year_payouts:end_year_payouts) {
+  print(year)
+
+  year_2 <- substr(year, 3, 4)
+  tpu_names <- read.csv(here("data/PRF_tpu/tpu_names.csv"))
+  tpu <- read.csv(here(paste0("data/PRF_tpu/SOBSCCTPU", year_2, ".TXT")),
+                  sep = "|", header = F)
+  names(tpu) <- names(tpu_names)
+
+  tpu$Type.Name <- trimws(tpu$Type.Name) # remove white space
+
+  if (year <= 2012) { ## 2012 had different type names
+    tpu[tpu$Type.Name == "Grazingland", "Type.Name"] <- "Grazing"
+    tpu[tpu$Type.Name == "Hayland",     "Type.Name"] <- "Haying"
+    tpu[tpu$Type.Name == "GRAZINGLAND", "Type.Name"] <- "Grazing"
+    tpu[tpu$Type.Name == "HAYLAND",     "Type.Name"] <- "Haying"
+  }
+
+  tpu$Commodity.Code <- as.numeric(tpu$Commodity.Code)
+
+  tpu <- tpu %>%
+    filter(State.Abbreviation %in% states) %>%
+    filter(Liability.Amount > 0) %>%
+    filter(Commodity.Code == 88) %>%   ## for PRF
+    filter(Type.Name == "Grazing")
+
+  print(nrow(tpu))
+
+  save(tpu, file = here(paste0("data/outputs/payouts/tpu_Grazing_", year, "_no_sim.rda")))
+  print(paste0("saved no-sim TPU for ", year))
+}
+
+```
+
+
+
+
+
+
+

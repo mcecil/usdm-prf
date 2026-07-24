@@ -55,174 +55,6 @@ tpu_collapsed <- tpu_collapsed %>%
 
 
 
-## run fixed effects regression
-```{r}
-library(fixest)
-
-# ── Version 1: Loss ratio only ────────────────────────────────────────────────
-m_year_lr <- feols(
-  ln_enroll ~ l(loss_ratio_raw, 1) * l(DM_mean, 1)
-  | year,
-  data     = tpu_collapsed,
-  panel.id = ~county_id + year
-)
-
-m_state_lr <- feols(
-  ln_enroll ~ l(loss_ratio_raw, 1) * l(DM_mean, 1)
-  | year + State.Code,
-  data     = tpu_collapsed,
-  panel.id = ~county_id + year
-)
-
-m_county_lr <- feols(
-  ln_enroll ~ l(loss_ratio_raw, 1) * l(DM_mean, 1)
-  | year + county_id,
-  data     = tpu_collapsed,
-  panel.id = ~county_id + year,
-  cluster  = ~county_id
-)
-
-# ── Version 2: RI payout % only ───────────────────────────────────────────────
-m_year_ri <- feols(
-  ln_enroll ~ l(RI_payout_pct, 1) * l(DM_mean, 1)
-  | year,
-  data     = tpu_collapsed,
-  panel.id = ~county_id + year
-)
-
-m_state_ri <- feols(
-  ln_enroll ~ l(RI_payout_pct, 1) * l(DM_mean, 1)
-  | year + State.Code,
-  data     = tpu_collapsed,
-  panel.id = ~county_id + year
-)
-
-m_county_ri <- feols(
-  ln_enroll ~ l(RI_payout_pct, 1) * l(DM_mean, 1)
-  | year + county_id,
-  data     = tpu_collapsed,
-  panel.id = ~county_id + year,
-  cluster  = ~county_id
-)
-
-# ── Version 3: Both variables ─────────────────────────────────────────────────
-m_year_both <- feols(
-  ln_enroll ~ l(loss_ratio_raw, 1) * l(DM_mean, 1) +
-              l(RI_payout_pct, 1)
-  | year,
-  data     = tpu_collapsed,
-  panel.id = ~county_id + year
-)
-
-m_state_both <- feols(
-  ln_enroll ~ l(loss_ratio_raw, 1) * l(DM_mean, 1) +
-              l(RI_payout_pct, 1)
-  | year + State.Code,
-  data     = tpu_collapsed,
-  panel.id = ~county_id + year
-)
-
-m_county_both <- feols(
-  ln_enroll ~ l(loss_ratio_raw, 1) * l(DM_mean, 1) +
-              l(RI_payout_pct, 1)
-  | year + county_id,
-  data     = tpu_collapsed,
-  panel.id = ~county_id + year,
-  cluster  = ~county_id
-)
-
-# ── Shared dict ───────────────────────────────────────────────────────────────
-reg_dict <- c(
-  "l(loss_ratio_raw, 1)"                       = "Lagged Loss Ratio",
-  "l(RI_payout_pct, 1)"                        = "Lagged RI Payout \\%",
-  "l(DM_mean, 1)"                              = "Lagged Drought Intensity",
-  "l(loss_ratio_raw, 1):l(DM_mean, 1)"         = "Lagged Loss Ratio $\\times$ Drought"
-)
-
-# ── Preview ───────────────────────────────────────────────────────────────────
-etable(m_year_lr,   m_state_lr,   m_county_lr,   digits = 5)
-etable(m_year_ri,   m_state_ri,   m_county_ri,   digits = 5)
-etable(m_year_both, m_state_both, m_county_both, digits = 5)
-
-# ── Export ────────────────────────────────────────────────────────────────────
-etable(
-  m_year_lr, m_state_lr, m_county_lr,
-  file   = here("data/outputs/tables/regression_table_lr.tex"),
-  tex    = TRUE,
-  label  = "tab:enrollment_lr",
-  title  = "Effect of Loss Ratio and Drought on Enrollment",
-  digits = 2,
-  digits.stats = 3,
-  dict   = reg_dict,
-  drop   = "year|State.Code|county_id"
-)
-
-etable(
-  m_year_ri, m_state_ri, m_county_ri,
-  file   = here("data/outputs/tables/regression_table_ri.tex"),
-  tex    = TRUE,
-  label  = "tab:enrollment_ri",
-  title  = "Effect of RI Payout Rate and Drought on Enrollment",
-  digits = 2,
-  digits.stats = 3,
-  dict   = reg_dict,
-  drop   = "year|State.Code|county_id"
-)
-
-etable(
-  m_year_both, m_state_both, m_county_both,
-  file   = here("data/outputs/tables/regression_table_both.tex"),
-  tex    = TRUE,
-  label  = "tab:enrollment_both",
-  title  = "Effect of Loss Ratio, RI Payout Rate, and Drought on Enrollment",
-  digits = 2,
-  digits.stats = 3,
-  dict   = reg_dict,
-  drop   = "year|State.Code|county_id"
-)
-
-```
-
-
-
-
-
-## percent changes in enrollment
-```{r}
-# ── Exact percent changes from county FE model ────────────────────────────────
-coefs <- coef(m_county_lr)
-
-pct_change <- function(beta) round((exp(beta) - 1) * 100, 2)
-
-# Individual effects
-beta_lr  <- coefs["l(loss_ratio_raw, 1)"]
-beta_dm  <- coefs["l(DM_mean, 1)"]
-beta_int <- coefs["l(loss_ratio_raw, 1):l(DM_mean, 1)"]
-
-cat("=== Exact percent changes (county FE model) ===\n\n")
-
-cat("Lagged Loss Ratio (1-unit increase):\n")
-cat(" ", pct_change(beta_lr), "%\n\n")
-
-cat("Lagged Drought Intensity (1-unit increase in DM):\n")
-cat(" ", pct_change(beta_dm), "%\n\n")
-
-cat("Lagged Drought Intensity (DM 0 -> 2, moderate drought):\n")
-cat(" ", pct_change(beta_dm * 2), "%\n\n")
-
-cat("Lagged Drought Intensity (DM 0 -> 4, exceptional drought):\n")
-cat(" ", pct_change(beta_dm * 4), "%\n\n")
-
-cat("Interaction (loss ratio=1, DM=1 jointly):\n")
-cat(" ", pct_change(beta_lr + beta_dm + beta_int), "%\n\n")
-
-cat("Interaction (loss ratio=1, DM=2 jointly):\n")
-cat(" ", pct_change(beta_lr + beta_dm * 2 + beta_int * 2), "%\n\n")
-
-cat("Interaction (loss ratio=1, DM=4 jointly):\n")
-cat(" ", pct_change(beta_lr + beta_dm * 4 + beta_int * 4), "%\n\n")
-```
-
 ## final 5 models to export
 
 ```{r}
@@ -251,27 +83,27 @@ pid <- ~county_id + year
 
 # ── Model 1: Loss Ratio + DM Mean (baseline) ──────────────────────────────────
 m1_yr <- feols(ln_enroll ~ l(loss_ratio_raw,1) * l(DM_mean,1) | year,
-               data = tpu_collapsed, panel.id = pid)
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 m1_st <- feols(ln_enroll ~ l(loss_ratio_raw,1) * l(DM_mean,1) | year + State.Code,
-               data = tpu_collapsed, panel.id = pid)
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 m1_co <- feols(ln_enroll ~ l(loss_ratio_raw,1) * l(DM_mean,1) | year + county_id,
                data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 
 # ── Model 2: Basis Risk + Any D4 ──────────────────────────────────────────────
 m2_yr <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) | year,
-               data = tpu_collapsed, panel.id = pid)
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 m2_st <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) | year + State.Code,
-               data = tpu_collapsed, panel.id = pid)
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 m2_co <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) | year + county_id,
                data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 
 # ── Model 3: Basis Risk + Any D4 + Loss Ratio ─────────────────────────────────
 m3_yr <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
                             l(loss_ratio_raw,1) | year,
-               data = tpu_collapsed, panel.id = pid)
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 m3_st <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
                             l(loss_ratio_raw,1) | year + State.Code,
-               data = tpu_collapsed, panel.id = pid)
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 m3_co <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
                             l(loss_ratio_raw,1) | year + county_id,
                data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
@@ -279,10 +111,10 @@ m3_co <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
 # ── Model 4: Basis Risk + Any D4 + Drought Intensity ─────────────────────────
 m4_yr <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
                             l(DM_mean,1) | year,
-               data = tpu_collapsed, panel.id = pid)
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 m4_st <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
                             l(DM_mean,1) | year + State.Code,
-               data = tpu_collapsed, panel.id = pid)
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 m4_co <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
                             l(DM_mean,1) | year + county_id,
                data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
@@ -290,10 +122,10 @@ m4_co <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
 # ── Model 5: Basis Risk + Any D4 + Loss Ratio + Drought Intensity ─────────────
 m5_yr <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
                             l(loss_ratio_raw,1) + l(DM_mean,1) | year,
-               data = tpu_collapsed, panel.id = pid)
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 m5_st <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
                             l(loss_ratio_raw,1) + l(DM_mean,1) | year + State.Code,
-               data = tpu_collapsed, panel.id = pid)
+               data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
 m5_co <- feols(ln_enroll ~ l(basis_risk_d4_ind,1) + l(any_d4,1) +
                             l(loss_ratio_raw,1) + l(DM_mean,1) | year + county_id,
                data = tpu_collapsed, panel.id = pid, cluster = ~county_id)
@@ -312,18 +144,6 @@ reg_dict <- c(
 #====================================================
 # 3. Export each model to its own .tex file
 #====================================================
-etable(
-  m1_yr, m1_st, m1_co,
-  file         = here("data/outputs/tables/reg_m1_baseline.tex"),
-  tex          = TRUE,
-  label        = "tab:reg_m1",
-  title        = "Model 1: Loss Ratio and Drought Intensity (Baseline)",
-  digits       = 2,
-  digits.stats = 3,
-  dict         = reg_dict,
-  drop         = "%year|%State.Code|%county_id"
-)
-
 etable(
   m2_yr, m2_st, m2_co,
   file         = here("data/outputs/tables/reg_m2_basis_risk.tex"),

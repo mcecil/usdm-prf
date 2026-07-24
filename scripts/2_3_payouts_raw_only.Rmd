@@ -488,62 +488,62 @@ save(tpu_collapsed, file = here("data/outputs/tpu_collapsed.rda"))
 ### very slow
 
 ```{r}
-
-load(file = here("data/outputs/tpu_collapsed.rda"))
-
-total_policies_sold_vct <- rep(NA_real_, nrow(tpu_collapsed))
-total_policies_earning_vct <- rep(NA_real_, nrow(tpu_collapsed))
-total_units_earning_vct <- rep(NA_real_, nrow(tpu_collapsed))
-
-
-
-# Loop over each row of tpu_collapsed
-for (i in seq_len(nrow(tpu_collapsed))) {
-  if(i %% 100 == 0){
-      print(i)
-  }
-  # Extract identifiers
-  county <- tpu_collapsed$County.Code[i]
-  state <- tpu_collapsed$State.Code[i]
-  year <- tpu_collapsed$year[i]
-  
-  # Get column names
-  data_w_names <- read.csv(here("data/PRF_sob/sobcov_2024_names.csv"))
-  column_names <- colnames(data_w_names)
-  
-  # Read the data file for this year
-  year_2 <- substr(as.character(year), 3, 4)
-  sob_data <- read.csv(here(paste0("data/PRF_sob/raw_files/sobcov", year_2, ".txt")),
-                   sep = '|')
-  names(sob_data) <- column_names
-  
-    # Filter for the specific commodity and insurance plan
-  data_prf <- sob_data %>%
-    filter(Commodity.Code == 88) %>% 
-    filter(Insurance.Plan.Code == 13) %>% 
-    filter(Location.State.Code == state) %>% 
-    filter(Location.County.Code == county) %>% 
-    select(Policies.Sold.Count, Policies.Earning.Premium.Count, Units.Earning.Premium.Count) 
-  
-  n_obs <- nrow(data_prf)
-  if(n_obs == 0){
-     total_policies_sold_vct[i] <- 0
-     total_policies_earning_vct[i] <- 0
-     total_units_earning_vct[i] <- 0
-     next
-  }
-
-  total_policies_sold_vct[i] <- sum(data_prf$Policies.Sold.Count)
-  total_policies_earning_vct[i] <- sum(data_prf$Policies.Earning.Premium.Count)
-  total_units_earning_vct[i] <- sum(data_prf$Units.Earning.Premium.Count)
-
-}
-
-tpu_collapsed$total_policies_sold <- total_policies_sold_vct
-tpu_collapsed$total_policies_earning <- total_policies_earning_vct
-tpu_collapsed$total_units_earning <- total_units_earning_vct
-
-save(tpu_collapsed, file = here("data/outputs/tpu_collapsed.rda"))
+# 
+# load(file = here("data/outputs/tpu_collapsed.rda"))
+# 
+# total_policies_sold_vct <- rep(NA_real_, nrow(tpu_collapsed))
+# total_policies_earning_vct <- rep(NA_real_, nrow(tpu_collapsed))
+# total_units_earning_vct <- rep(NA_real_, nrow(tpu_collapsed))
+# 
+# 
+# 
+# # Loop over each row of tpu_collapsed
+# for (i in seq_len(nrow(tpu_collapsed))) {
+#   if(i %% 100 == 0){
+#       print(i)
+#   }
+#   # Extract identifiers
+#   county <- tpu_collapsed$County.Code[i]
+#   state <- tpu_collapsed$State.Code[i]
+#   year <- tpu_collapsed$year[i]
+#   
+#   # Get column names
+#   data_w_names <- read.csv(here("data/PRF_sob/sobcov_2024_names.csv"))
+#   column_names <- colnames(data_w_names)
+#   
+#   # Read the data file for this year
+#   year_2 <- substr(as.character(year), 3, 4)
+#   sob_data <- read.csv(here(paste0("data/PRF_sob/raw_files/sobcov", year_2, ".txt")),
+#                    sep = '|')
+#   names(sob_data) <- column_names
+#   
+#     # Filter for the specific commodity and insurance plan
+#   data_prf <- sob_data %>%
+#     filter(Commodity.Code == 88) %>% 
+#     filter(Insurance.Plan.Code == 13) %>% 
+#     filter(Location.State.Code == state) %>% 
+#     filter(Location.County.Code == county) %>% 
+#     select(Policies.Sold.Count, Policies.Earning.Premium.Count, Units.Earning.Premium.Count) 
+#   
+#   n_obs <- nrow(data_prf)
+#   if(n_obs == 0){
+#      total_policies_sold_vct[i] <- 0
+#      total_policies_earning_vct[i] <- 0
+#      total_units_earning_vct[i] <- 0
+#      next
+#   }
+# 
+#   total_policies_sold_vct[i] <- sum(data_prf$Policies.Sold.Count)
+#   total_policies_earning_vct[i] <- sum(data_prf$Policies.Earning.Premium.Count)
+#   total_units_earning_vct[i] <- sum(data_prf$Units.Earning.Premium.Count)
+# 
+# }
+# 
+# tpu_collapsed$total_policies_sold <- total_policies_sold_vct
+# tpu_collapsed$total_policies_earning <- total_policies_earning_vct
+# tpu_collapsed$total_units_earning <- total_units_earning_vct
+# 
+# save(tpu_collapsed, file = here("data/outputs/tpu_collapsed.rda"))
 
 ```
 

@@ -11,28 +11,8 @@ knitr::opts_chunk$set(echo = TRUE)
 ## load required libraries
 
 ```{r}
-
-library(dplyr)
-library(here)
-library(sf)
-library(raster)
-library(conflicted)
-library(rlang)
-library(scico)
-library(ggpubr)
-library(assertthat)
-library(ggplot2)
-library(stringr)
-library(tidyr)
-library(gt)
-library(viridis)
-library(scales)
-
-conflicted::conflict_prefer("select", "dplyr")
-conflicted::conflict_prefer("filter", "dplyr")
-options(max.print = 10000)
+source(here::here("_setup.R"))
 ```
-
 
 
 ## initial plots
@@ -45,146 +25,11 @@ load(here("data/outputs/grids_usdm_stats.rda"))
 
 grids <- grids %>% filter(!is.na(cpc_index_2010_625)) %>% filter(!(is.na(DM_median_2010_625)))
 
-ri_threshold <- 0.9
-high_drought_threshold <- 4
-high_drought_label <-"D4"
-
-start_year <- 2010
-end_year <- 2025
-
-aoi_states <- c("CA", "NV", "AZ", "NM", "CO", "UT", "TX", "OK", "KS")
-
-interval_start_months <- 1:11
-names(interval_start_months) <- 625:635
-
-interval_end_months <- 2:12
-names(interval_end_months) <- 625:635
-
-```
-
-## function for exporting tables
-
-```{r}
-
-export_df_to_latex <- function(df, file_path, caption = NULL) {
-  
-  #-----------------------------
-  # Helper: escape LaTeX specials
-  #-----------------------------
-  escape_latex <- function(x) {
-    x <- gsub("\\\\", "\\\\textbackslash{}", x)
-    x <- gsub("([%&_#\\$])", "\\\\\\1", x)
-    x <- gsub("_", "\\\\_", x)
-    return(x)
-  }
-  
-  # Convert to character
-  df[] <- lapply(df, as.character)
-  
-  # Escape LaTeX characters
-  df[] <- lapply(df, escape_latex)
-  colnames(df) <- escape_latex(colnames(df))
-  
-  # Alignment: first left, rest right
-  n_cols <- ncol(df)
-  align_string <- paste0("l", paste(rep("r", n_cols - 1), collapse = ""))
-  
-  # Build body rows
-  body_rows <- apply(df, 1, function(row) {
-    paste(row, collapse = " & ")
-  })
-  
-  body_rows <- paste0(body_rows, " \\\\")
-  body_text <- paste(body_rows, collapse = "\n")
-  
-  # Header row
-  header <- paste(colnames(df), collapse = " & ")
-  header <- paste0(header, " \\\\")
-  
-  # Caption + label handling
-  file_name <- tools::file_path_sans_ext(basename(file_path))
-  
-  if (is.null(caption)) {
-    caption_text <- gsub("_", " ", file_name)
-  } else {
-    caption_text <- caption
-  }
-  
-  label <- paste0("tab:", file_name)
-  
-  # Build LaTeX table
-  latex_table <- paste0(
-"\\begin{table}[t]
-\\centering
-\\fontsize{12pt}{14pt}\\selectfont
-\\begin{tabular}{@{\\extracolsep{\\fill}}", align_string, "}
-\\toprule
-", header, "
-\\midrule\\addlinespace[2.5pt]
-", body_text, "
-\\bottomrule
-\\end{tabular}
-\\caption{", caption_text, "}
-\\label{", label, "}
-\\end{table}"
-  )
-  
-  # Write file
-  writeLines(latex_table, file_path)
-  
-  message("LaTeX table exported to: ", file_path)
-}
-
-
 
 ```
 
 
 ```{r}
-
-build_latex_single_row <- function(dm_row, ri_row, file_path, caption = NULL) {
-
-  dm_header  <- paste(c("", names(dm_row)), collapse = " & ")
-  dm_datarow <- paste(c("\\% of grid-intervals", dm_row), collapse = " & ")
-
-  ri_header  <- paste(c("", names(ri_row)), collapse = " & ")
-  ri_datarow <- paste(c("\\% of grid-intervals", ri_row), collapse = " & ")
-
-  file_name   <- tools::file_path_sans_ext(basename(file_path))
-  caption_txt <- if (is.null(caption)) gsub("_", " ", file_name) else caption
-  label       <- paste0("tab:", file_name)
-
-  body <- paste0(
-"\\begin{table}[t]
-\\centering
-\\fontsize{11pt}{13pt}\\selectfont
-\\begin{tabular}{@{\\extracolsep{\\fill}}lrrrrr}
-\\toprule
-\\multicolumn{6}{l}{\\textit{Panel A: USDM Drought Classification (\\% of grid-intervals $\\geq$ threshold)}} \\\\
-\\midrule
-", dm_header, " \\\\
-\\addlinespace[2pt]
-", dm_datarow, " \\\\
-\\midrule
-\\addlinespace[4pt]
-\\multicolumn{6}{l}{\\textit{Panel B: PRF Rainfall Index Payout Frequency (\\% of grid-intervals $\\leq$ threshold)}} \\\\
-\\midrule
-", ri_header, " \\\\
-\\addlinespace[2pt]
-", ri_datarow, " \\\\
-\\bottomrule
-\\end{tabular}
-\\caption{", caption_txt, "}
-\\label{", label, "}
-\\end{table}"
-  )
-
-  # Escape all bare % signs (that aren't already escaped)
-  body <- gsub("(?<!\\\\)%", "\\\\%", body, perl = TRUE)
-
-  writeLines(body, file_path)
-  message("Exported: ", file_path)
-}
 
 # ── Compute single-row percentages ────────────────────────────────────────────
 years     <- start_year:end_year
@@ -222,12 +67,7 @@ ri_row <- sapply(ri_thresholds, function(thr) {
 names(ri_row) <- paste0("RI$\\leq$", sprintf("%.2f", ri_thresholds))
 
 # ── Export ────────────────────────────────────────────────────────────────────
-build_latex_single_row(
-  dm_row    = dm_row,
-  ri_row    = ri_row,
-  file_path = here("data/outputs/tables/summary_dm_ri_thresholds.tex"),
-  caption   = "USDM and PRF payout frequencies across all grid-intervals, 2010--2025"
-)
+# (single-row layout removed; the two-column layout below is the version used)
 
 ```
 
@@ -315,5 +155,4 @@ build_latex_two_column(
 )
 
 ```
-
 

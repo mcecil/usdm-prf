@@ -27,7 +27,22 @@ Folder and year inputs
 
 ```{r}
 
-cpc_download_folder <- "/Users/mjcecil/Documents/GitHub/prf-ri/data/cpc_downloads"
+# ---- Configuration: raw CPC data location ----------------------------------
+# 1_1 is the ONLY script that reads the raw CPC daily precipitation files
+# (~30 GB), which are stored OUTSIDE this repo due to size. Downstream scripts
+# do NOT need these files -- they read the derived monthly_averages_na_rm.csv
+# produced below. Point this at your local CPC download directory, either by
+# setting the CPC_DOWNLOAD_DIR environment variable or editing the default here.
+cpc_download_folder <- Sys.getenv(
+  "CPC_DOWNLOAD_DIR",
+  unset = "~/Documents/GitHub/prf-ri/data/cpc_downloads"   # <-- edit for your machine
+)
+cpc_download_folder <- path.expand(cpc_download_folder)
+
+stopifnot(
+  "CPC download folder not found -- set CPC_DOWNLOAD_DIR or edit the default in 1_1" =
+    dir.exists(cpc_download_folder)
+)
 
 outputs_folder <- here("data/outputs")
 
@@ -162,16 +177,6 @@ for(year in start_year_ri:end_year_ri){
     monthly_averages[[paste0("cpc_index_", year, "_", interval)]] <- round(current_year_precip/baseline_avg,
                                                                            5)
 
-    # baseline_30_precip_columns <- paste0("precip_",
-    #                                   (year - 31):(year - 2),
-    #                                   "-",
-    #                                   interval)
-    # 
-    # baseline_30_avg <- rowMeans(monthly_averages[, baseline_30_precip_columns ])
-    # 
-    # monthly_averages[[paste0("cpc_index_30_", year, "_", interval)]] <- round(current_year_precip/baseline_30_avg,
-    #                                                                                             5)
-
   }
 }
 
@@ -193,6 +198,7 @@ print(table(monthly_averages$total_interval_na_count))
 
 
 ```{r}
+## QC check (exploratory) -- inspect valid grids; not saved, not used downstream
 valid_grids <- monthly_averages %>% filter(total_interval_na_count == 0)
 
 cpc_index_columns <- names(valid_grids)[grepl("cpc_index_2", names(valid_grids))]
