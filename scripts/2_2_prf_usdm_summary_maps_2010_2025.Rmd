@@ -440,8 +440,8 @@ aoi_dissolved_usdm <- states %>%
   st_union()
 
 p_prf_acres <- ggplot() +
-  geom_sf(data = states_map, aes(fill = acres_bin), color = "black", linewidth = 0.2) +
-  geom_sf(data = aoi_dissolved, fill = NA, color = "black", linewidth = 0.8) +
+  geom_sf(data = states_map, aes(fill = acres_bin), color = "grey", linewidth = 0.2) +
+  geom_sf(data = aoi_dissolved, fill = NA, color = "black", linewidth = 1) +
   scale_fill_viridis_d(
     name = "Total PRF Acres",
     option = "C",
@@ -465,8 +465,8 @@ p_prf_acres <- ggplot() +
 
 p_usdm <- ggplot() +
   geom_sf(data = grid, aes(fill = D4_percent), color = NA) +
-  geom_sf(data = states, fill = NA, color = "black", linewidth = 0.3) +
-  geom_sf(data = aoi_dissolved_usdm, fill = NA, color = "black", linewidth = 0.8) +
+  geom_sf(data = states, fill = NA, color = "grey", linewidth = 0.3) +
+  geom_sf(data = aoi_dissolved_usdm, fill = NA, color = "black", linewidth = 1) +
   scale_fill_viridis_c(
     name = "% Time in D4",
     option = "C",

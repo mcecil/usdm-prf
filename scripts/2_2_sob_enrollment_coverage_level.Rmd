@@ -401,11 +401,45 @@ print(acre_table_aoi)
 ```
 
 ```{r}
+
+acre_table_export <- acre_table_aoi %>%
+  arrange(rank) %>%
+  mutate(
+    total_acres_millions = round(total_acres_all_years / 1e6),
+    pct_national         = paste0(round(pct_national), "%")  # plain %, let escape_latex handle it
+  ) %>%
+  select(
+    State,
+    `Total Acres (M)`     = total_acres_millions,
+    `Share of US Acreage` = pct_national,
+    `Rank (2010-2025)`    = rank
+  ) %>%
+  mutate(across(everything(), as.character)) %>%
+  mutate(
+    `Rank (2010-2025)` = ifelse(`Rank (2010-2025)` == "NA", "---", `Rank (2010-2025)`)
+  )
+
+# Replace NA in other columns
+acre_table_export[acre_table_export == "NA"] <- "---"
+
+export_df_to_latex(
+  df        = acre_table_export,
+  file_path = here("data/outputs/tables/acre_table_aoi.tex"),
+  caption   = "PRF-RI enrolled acres by state, 2010--2025"
+)
+```
+
+
+
+```{r}
 #---------------------------
 # Plot for ACRES % change by state (AOI states only)
 #---------------------------
 
+
 # Calculate % change from previous year
+conflicts_prefer(dplyr::lag)
+
 state_pct_change <- state_policy_enrollment %>%
   filter(State %in% aoi_states) %>%
   arrange(State, year) %>%
@@ -457,17 +491,17 @@ p_acres_pct
 
 
 ```{r}
-state_policy_enrollment_aoi <- state_policy_enrollment %>% filter(Location.State.Abbreviation %in% aoi_states)
+state_policy_enrollment_aoi <- state_policy_enrollment %>% filter(State %in% aoi_states)
 
 
 ```
 
 ## Number of states enrolled by year
 ```{r}
-# for (current_year in 2007:2025){
-#   print(current_year)
-#   print(state_policy_enrollment %>% filter(year == current_year) %>% pull(Location.State.Abbreviation) %>% unique() %>% length())
-# }
+for (current_year in 2010:2025){
+  print(current_year)
+  print(state_policy_enrollment %>% filter(year == current_year) %>% pull(Location.State.Abbreviation) %>% unique() %>% length())
+}
 ```
 
 
@@ -512,6 +546,8 @@ year_prf_enrollment <- lapply(start_year:end_year, function(year){
   
   data.frame(
     year = year,
+    acreage_prf = total_acreage_prf,
+    acreage_all = total_acreage_all,
     pct_liability = total_liability / total_liability_all,
     pct_acreage   = total_acreage_prf / total_acreage_all
   )
@@ -521,6 +557,67 @@ year_prf_enrollment <- lapply(start_year:end_year, function(year){
 year_prf_enrollment[["year"]] <- as.Date(paste0(year_prf_enrollment[["year"]], "-01-01"))
 
 ```
+
+## SOB total PRF subsidies
+
+```{r}
+### PRF subsidies by state and year — all US states, 2010–2025
+
+subsidy_years <- 2010:2025
+
+prf_subsidy_by_state_year <- lapply(subsidy_years, function(year){
+  print(year)
+
+  # Canonical column names (same source used elsewhere in this file)
+  data_w_names <- read.csv(here("data/PRF_sob/sobcov_2024_names.csv"))
+  column_names <- colnames(data_w_names)
+
+  year_2 <- substr(as.character(year), 3, 4)
+  data <- read.csv(here(paste0("data/PRF_sob/raw_files/sobcov", year_2, ".txt")),
+                   sep = '|')
+  names(data) <- column_names
+
+  # PRF program only: Commodity Code 88, Insurance Plan Code 13
+  data_prf <- data %>%
+    filter(Commodity.Code == 88) %>%
+    filter(Insurance.Plan.Code == 13)
+
+  # Locate the "Subsidy Amount ($)" column robustly.
+  # read.csv() sanitizes the header: "Subsidy Amount ($)" -> "Subsidy.Amount...."
+  # Anchor with ^ so we don't grab "Additional Subsidy Amount".
+  subsidy_col <- grep("^Subsidy\\.Amount", colnames(data_prf), value = TRUE)[1]
+
+  state_sums <- data_prf %>%
+    group_by(Location.State.Abbreviation) %>%
+    summarize(subsidy = sum(.data[[subsidy_col]], na.rm = TRUE), .groups = "drop")
+
+  state_sums$year <- year
+  state_sums
+
+}) %>% do.call("rbind", .)
+
+# Ensure every state-year combination is present (fill missing with 0)
+all_states_subsidy <- unique(prf_subsidy_by_state_year$Location.State.Abbreviation)
+
+prf_subsidy_by_state_year <- prf_subsidy_by_state_year %>%
+  complete(Location.State.Abbreviation = all_states_subsidy,
+           year = subsidy_years,
+           fill = list(subsidy = 0)) %>%
+  rename(State = Location.State.Abbreviation)
+
+# National annual total across all US states
+prf_subsidy_by_year <- prf_subsidy_by_state_year %>%
+  group_by(year) %>%
+  summarize(total_subsidy = sum(subsidy, na.rm = TRUE), .groups = "drop")
+
+print(prf_subsidy_by_year)
+
+# Grand total across all states and all years, 2010–2025
+total_prf_subsidy_2010_2025 <- sum(prf_subsidy_by_state_year$subsidy, na.rm = TRUE)
+print(total_prf_subsidy_2010_2025)
+```
+
+
 
 ## Percent grazing by year
 
@@ -608,6 +705,16 @@ prf_grazing_pct_by_year <- function(years,
 years <- 2007:2025
 prf_shares <- prf_grazing_pct_by_year(years)
 print(prf_shares)
+
+```
+
+## Coverage level acreage share all years
+
+```{r}
+
+print(sum(prf_shares$grazing_acres)/(sum(prf_shares$grazing_acres) + sum(prf_shares$haying_acres)))
+
+
 
 ```
 
