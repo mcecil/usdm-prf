@@ -135,7 +135,7 @@ p_crosstab <- ggplot() +
     values = combo_colors,
     name = NULL
   ) +
-  labs(title = "Crosstab Map : DM = 4 vs RI ≤ 0.9, July–August 2022") +
+  labs(title = "Crosstab Map: DM = 4 vs RI ≤ 0.9, July–August 2022") +
   theme_minimal() +
   guides(
     fill = guide_legend(nrow = 2)
@@ -783,34 +783,36 @@ summarise_wide <- function(grids_wide, group_var = NULL) {
 }
 
 format_summary <- function(df) {
+  pct <- function(x) ifelse(is.na(x), "---", paste0(round(x * 100), "%"))
+
   df %>%
     mutate(
       overall_drought_pct           = drought_n / total_obs,
       overall_payout_pct            = payout_n  / total_obs,
-      payout_pct_during_drought     = ifelse(drought_n > 0,
-                                             drought_payout_n / drought_n, NA),
-      non_payout_pct_during_drought = ifelse(drought_n > 0,
-                                             drought_no_payout_n / drought_n, NA)
+      payout_pct_during_drought     = ifelse(drought_n > 0, drought_payout_n    / drought_n, NA),
+      non_payout_pct_during_drought = ifelse(drought_n > 0, drought_no_payout_n / drought_n, NA)
     ) %>%
     mutate(
-      overall_drought_pct           = paste0(round(overall_drought_pct * 100),           "%"),
-      overall_payout_pct            = paste0(round(overall_payout_pct * 100),            "%"),
-      payout_pct_during_drought     = paste0(round(payout_pct_during_drought * 100),     "%"),
-      non_payout_pct_during_drought = paste0(round(non_payout_pct_during_drought * 100), "%")
+      overall_drought_pct           = pct(overall_drought_pct),
+      overall_payout_pct            = pct(overall_payout_pct),
+      payout_pct_during_drought     = pct(payout_pct_during_drought),
+      non_payout_pct_during_drought = pct(non_payout_pct_during_drought)
     ) %>%
     select(
       any_of(c("Period", "STATE", "year")),
       overall_drought_pct,
+      drought_n,                       # N (D4 intervals) — right after D4 Rate
       overall_payout_pct,
       payout_pct_during_drought,
       non_payout_pct_during_drought,
       drought_no_payout_n
     ) %>%
     rename(
-      `D4 Rate`                    = overall_drought_pct,
-      `RI Payout Rate`             = overall_payout_pct,
-      `Payout During Drought`      = payout_pct_during_drought,
-      `Non-Payout During Drought`  = non_payout_pct_during_drought,
+      `D4 Rate`                      = overall_drought_pct,
+      `N (D4 intervals)`             = drought_n,
+      `RI Payout Rate`               = overall_payout_pct,
+      `Payout During Drought`        = payout_pct_during_drought,
+      `Non-Payout During Drought`    = non_payout_pct_during_drought,
       `Drought-Without-Payout Count` = drought_no_payout_n
     )
 }
@@ -1284,5 +1286,73 @@ bind_rows(
   )
 
 
+```
+
+```{r reported-values}
+## ---- Reported values (for manuscript cross-check) ----------------------------
+## Prints the key numbers quoted in the text and writes them to a timestamped
+## text file. Regenerates on every run, so the manuscript can be checked against
+## current values. Assumes grids_collapsed and the *_total objects already exist
+## (i.e., run after the cross-tab counting section above).
+
+
+## grid-count figures (Methods 4.1)
+n_grid_rows    <- nrow(grids_collapsed)                       # state-duplicated ("5,093")
+n_grid_unique  <- length(unique(grids_collapsed$GRIDCODE))    # deduplicated ("4,758")
+n_intervals    <- 176                                         # 16 years x 11 intervals
+n_comparisons  <- n_grid_rows * n_intervals                   # ("896,368")
+
+## overall drought/payout rates (Table 4 / Results 5.1)
+overall_payout_pct   <- 100 * (both_total + ri_only_total) / total_combos
+drought_payout_pct   <- 100 * both_total / (both_total + dm_only_total)
+missed_payout_pct    <- 100 - drought_payout_pct
+d4_rate_pct          <- 100 * (both_total + dm_only_total) / total_combos
+
+## drought-without-payout raw count: highest single grid ("24 such events")
+max_drought_no_payout <- max(grids_collapsed$dm_only_count, na.rm = TRUE)
+
+## grids exceeding 80% missed payout, among grids with >= 10 D4 intervals
+high_missed_grids <- sum(
+  grids_collapsed$dm_true_count >= 10 & grids_collapsed$missed_payout_pct > 80,
+  na.rm = TRUE
+)
+
+## assemble
+report_lines <- c(
+  paste0("PRF x USDM -- reported values  (generated ", format(Sys.time(), "%Y-%m-%d %H:%M"), ")"),
+  strrep("-", 60),
+  "Grid counts (Methods 4.1):",
+  sprintf("  grid rows (state-duplicated):     %s", format(n_grid_rows, big.mark = ",")),
+  sprintf("  unique grid cells:                %s", format(n_grid_unique, big.mark = ",")),
+  sprintf("  intervals (16 x 11):              %d", n_intervals),
+  sprintf("  comparison points:                %s", format(n_comparisons, big.mark = ",")),
+  "",
+  "Overall rates (Table 4 / Results 5.1):",
+  sprintf("  D4 rate:                          %.1f%%", d4_rate_pct),
+  sprintf("  overall PRF payout rate:          %.1f%%", overall_payout_pct),
+  sprintf("  payout rate during D4 drought:    %.1f%%", drought_payout_pct),
+  sprintf("  missed payout rate:               %.1f%%", missed_payout_pct),
+  "",
+  "Cross-tab totals (Table S3):",
+  sprintf("  drought without payout (dm_only): %s", format(dm_only_total,  big.mark = ",")),
+  sprintf("  no drought with payout (ri_only): %s", format(ri_only_total, big.mark = ",")),
+  sprintf("  drought with payout (both):       %s", format(both_total,    big.mark = ",")),
+  sprintf("  neither:                          %s", format(neither_total, big.mark = ",")),
+  sprintf("  total comparisons:                %s", format(total_combos,  big.mark = ",")),
+  "",
+  "Extremes (Results 5.1):",
+  sprintf("  max drought-without-payout count (single grid): %d", max_drought_no_payout),
+  sprintf("  grids >80%% missed (>=10 D4 intervals):          %d", high_missed_grids)
+)
+
+## print to console
+cat(report_lines, sep = "\n")
+
+## save to file
+out_path <- here("data/outputs/reported_values.txt")
+writeLines(report_lines, out_path)
+message("\nWrote reported values to: ", out_path)
+
+```
 ```
 

@@ -149,7 +149,7 @@ etable(
   file         = here("data/outputs/tables/reg_m2_basis_risk.tex"),
   tex          = TRUE,
   label        = "tab:reg_m2",
-  title        = "Model 2: Basis Risk and Drought Indicator",
+  title        = "Participation Model: Basis Risk and Drought Indicator",
   digits       = 2,
   digits.stats = 3,
   dict         = reg_dict,
@@ -161,7 +161,7 @@ etable(
   file         = here("data/outputs/tables/reg_m3_br_lr.tex"),
   tex          = TRUE,
   label        = "tab:reg_m3",
-  title        = "Model 3: Basis Risk, Drought Indicator, and Loss Ratio",
+  title        = "Basis Risk, Drought Indicator, and Loss Ratio",
   digits       = 2,
   digits.stats = 3,
   dict         = reg_dict,
@@ -173,7 +173,7 @@ etable(
   file         = here("data/outputs/tables/reg_m4_br_dm.tex"),
   tex          = TRUE,
   label        = "tab:reg_m4",
-  title        = "Model 4: Basis Risk, Drought Indicator, and Drought Intensity",
+  title        = "Basis Risk, Drought Indicator, and Drought Intensity",
   digits       = 2,
   digits.stats = 3,
   dict         = reg_dict,
@@ -185,7 +185,7 @@ etable(
   file         = here("data/outputs/tables/reg_m5_full.tex"),
   tex          = TRUE,
   label        = "tab:reg_m5",
-  title        = "Model 5: Basis Risk, Drought Indicator, Loss Ratio, and Drought Intensity",
+  title        = "Basis Risk, Drought Indicator, Loss Ratio, and Drought Intensity",
   digits       = 2,
   digits.stats = 3,
   dict         = reg_dict,
@@ -256,10 +256,10 @@ message("PDF exported to: ", pdf_file)
 ## create estimation sample df (that excludes removed observations), and exporting descriptive stats
 
 ```{r}
-estimation_sample <- tpu_collapsed[m5_co$obs_selection$obsRemoved, ]
+estimation_sample <- tpu_collapsed[obs(m2_yr), ]
 
 # Verify
-nrow(estimation_sample) == nobs(m5_co)  # should be TRUE
+nrow(estimation_sample) == nobs(m2_yr)   # should be TRUE  → 6104
 
 #====================================================
 # Function: export_desc_stats_latex
@@ -324,10 +324,12 @@ export_desc_stats_latex <- function(df, vars_spec, file_path,
   caption_txt <- if (is.null(caption)) "" else caption
 
   # ── Full table ──────────────────────────────────────────────────────────────
-  latex <- paste0(
+latex <- paste0(
 "\\small
 \\begin{table}[htbp]
 \\centering
+\\caption{", caption_txt, "}
+\\label{", label, "}
 \\begin{tabular}{p{8.5cm}rrrrr}
 \\toprule
 \\textbf{Variable} & Mean & Std.\\ Dev. & Min & Max & N \\\\
@@ -335,11 +337,9 @@ export_desc_stats_latex <- function(df, vars_spec, file_path,
 ", body_rows, "
 \\bottomrule
 \\end{tabular}
-\\caption{", caption_txt, "}
-\\label{", label, "}
 \\end{table}
 \\normalsize"
-  )
+)
 
   writeLines(latex, file_path)
   message("Exported: ", file_path)
@@ -365,10 +365,19 @@ export_desc_stats_latex(
   df        = estimation_sample,
   vars_spec = vars_spec,
   file_path = here("data/outputs/tables/desc_stats_regression.tex"),
-  caption   = "Descriptive statistics for regression variables. Each observation is a unique county-year with non-zero enrollment",
+  caption = "Descriptive statistics for regression variables. Each observation is a unique county-year with strictly positive PRF enrollment in both the current and prior year (n = 6{,}104).",
   label     = "tab:desc_stats"
 )
 
+```
+
+```{r}
+n_raw <- nrow(tpu_collapsed)            # 6775
+n_base <- nobs(m2_yr)                   # 6104
+n_cofe <- nobs(m2_co)                   # 6091
+writeLines(sprintf("raw=%d dropped_bothyears=%d base=%d county_fe=%d singletons=%d",
+                   n_raw, n_raw - n_base, n_base, n_cofe, n_base - n_cofe),
+           here("data/outputs/reported_values_sample.txt"))
 ```
 
 
@@ -436,6 +445,20 @@ cat("\n=== Model 5: Basis Risk + Any D4 + Loss Ratio + Drought Intensity ===\n")
 vif(m_vif_m5)
 ```
 
+```{r}
+# columns (1)-(2) sample = year-only baseline (no singleton drop) -> 6,104
+estimation_sample <- tpu_collapsed[obs(m2_yr), ]
+nrow(estimation_sample)   # expect 6,104
+
+# if you'd rather describe the county-FE sample (col 3) -> 6,091:
+# estimation_sample <- tpu_collapsed[obs(m2_co), ]
+
+nrow(estimation_sample)                 # 6,104
+nrow(estimation_sample) == nobs(m2_yr)  # TRUE  (was the old line-262 check, keep it)
+sum(!is.finite(tpu_collapsed$ln_enroll))# how many zero/dropped-enrollment county-years exist
+# how many gap-year rows the position lag was silently keeping:
+6208 - 6104      
+```
 
 
 

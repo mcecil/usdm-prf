@@ -298,7 +298,7 @@ acre_table_export <- acre_table_aoi %>%
   ) %>%
   select(
     State,
-    `Total Acres (M)`     = total_acres_millions,
+    `Enrolled Acres (M)`     = total_acres_millions,
     `Share of US Acreage` = pct_national,
     `Rank (2010-2025)`    = rank
   ) %>%
@@ -313,7 +313,7 @@ acre_table_export[acre_table_export == "NA"] <- "---"
 export_df_to_latex(
   df        = acre_table_export,
   file_path = here("data/outputs/tables/acre_table_aoi.tex"),
-  caption   = "PRF-RI enrolled acres by state, 2010--2025"
+  caption = "PRF-RI enrolled acres by state, summed across 2010--2025 (acre-years). Share of US acreage and rank are computed on the same cumulative basis."
 )
 ```
 
@@ -636,29 +636,34 @@ acres_share <- acres_by_cov %>%
 #---------------------------
 # 4) Plot — Acres by coverage level
 #---------------------------
+# 4) Plot — Acres by coverage level
+#---------------------------
 p_acres <- ggplot(acres_by_cov,
                   aes(x = year,
                       y = acres,
                       color = factor(Coverage.Level.Percent),
                       group = Coverage.Level.Percent)) +
-  geom_line(linewidth = 1.2) +
-  geom_point(size = 2) +
-  scale_y_continuous(labels = comma) +
+  geom_line(linewidth = 1.4) +
+  geom_point(size = 2.5) +
+  scale_y_continuous(
+    labels = label_number(scale = 1e-6, suffix = "M", accuracy = 1)
+  ) +
   labs(
     title = "Insured Acres by Coverage Level",
     x = NULL,
-    y = "Acres",
+    y = "Acres (millions)",
     color = "Coverage Level (%)"
   ) +
-  theme_minimal() +
+  theme_minimal(base_size = 16) +
   theme(
-    axis.title = element_text(size = 14),
-    axis.text  = element_text(size = 13),
-    plot.title = element_text(size = 16),
+    axis.title      = element_text(size = 18),
+    axis.text       = element_text(size = 16),
+    plot.title      = element_text(size = 20, face = "bold"),
     legend.position = "top",
-    legend.text  = element_text(size = 13),
-    legend.title = element_text(size = 14),
-    legend.key.size = unit(1.2, "lines")
+    legend.text     = element_text(size = 15),
+    legend.title    = element_text(size = 16),
+    legend.key.size = unit(1.4, "lines"),
+    panel.grid.minor = element_blank()
   )
 #---------------------------
 # 5) Plot — Share of acres
@@ -689,12 +694,14 @@ p_share <- ggplot(acres_share,
 p_acres
 p_share
 
-png(here("data/outputs/figures/coverage_level_year.png"),
-    width = 800,
-    heigh = 600)
-plot(p_acres)
-dev.off()
-
+ggsave(
+  filename = here("data/outputs/figures/coverage_level_year.png"),
+  plot     = p_acres,
+  width    = 9,
+  height   = 6.5,
+  dpi      = 300,
+  bg       = "white"
+)
 
 ```
 

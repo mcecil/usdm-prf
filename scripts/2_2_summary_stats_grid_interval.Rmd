@@ -59,7 +59,8 @@ ri_long <- grids %>%
 dm_row <- sapply(dm_thresholds, function(thr) {
   paste0(round(mean(dm_long$DM >= thr, na.rm = TRUE) * 100), "\\%")
 })
-names(dm_row) <- paste0("DM$\\geq$", dm_thresholds)
+
+names(dm_row) <- c("DM$\\geq$0", "DM$\\geq$1", "DM$\\geq$2", "DM$\\geq$3", "DM$=$4")
 
 ri_row <- sapply(ri_thresholds, function(thr) {
   paste0(round(mean(ri_long$RI <= thr, na.rm = TRUE) * 100), "\\%")
@@ -105,38 +106,36 @@ build_latex_two_column <- function(dm_row, ri_row, file_path, caption = NULL) {
   label       <- paste0("tab:", file_name)
 
   # Note: use ACTUAL % in the R string here — the gsub at the end will escape them
+# NOW — caption first, then the two side-by-side panels:
   body <- paste0(
-"\\begin{table}[H]
-\\small
-\\begin{minipage}{0.48\\linewidth}
-\\centering
-\\textbf{USDM Classification}\\\\[4pt]
-\\begin{tabular}{lr}
-\\toprule
-Threshold & \\% grid-intervals \\\\
-\\midrule
-", dm_body, "
-\\bottomrule
-\\end{tabular}
-\\end{minipage}
-\\hfill
-\\begin{minipage}{0.48\\linewidth}
-\\centering
-\\textbf{PRF-RI Payouts}\\\\[4pt]
-\\begin{tabular}{lr}
-\\toprule
-Threshold & \\% grid-intervals \\\\
-\\midrule
-", ri_body, "
-\\bottomrule
-\\end{tabular}
-\\end{minipage}
-\\vspace{4pt}
-\\begin{minipage}{\\linewidth}
-\\caption{", caption_txt, "}
-\\label{", label, "}
-\\end{minipage}
-\\end{table}"
+  "\\begin{table}[H]
+  \\small
+  \\caption{", caption_txt, "}
+  \\label{", label, "}
+  \\begin{minipage}{0.48\\linewidth}
+  \\centering
+  \\textbf{USDM Classification}\\\\[4pt]
+  \\begin{tabular}{lr}
+  \\toprule
+  Threshold & \\% grid-intervals \\\\
+  \\midrule
+  ", dm_body, "
+  \\bottomrule
+  \\end{tabular}
+  \\end{minipage}
+  \\hfill
+  \\begin{minipage}{0.48\\linewidth}
+  \\centering
+  \\textbf{PRF-RI Payouts}\\\\[4pt]
+  \\begin{tabular}{lr}
+  \\toprule
+  Threshold & \\% grid-intervals \\\\
+  \\midrule
+  ", ri_body, "
+  \\bottomrule
+  \\end{tabular}
+  \\end{minipage}
+  \\end{table}"
   )
 
   # Escape bare % signs (not already preceded by \)

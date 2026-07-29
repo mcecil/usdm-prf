@@ -128,8 +128,10 @@ export_df_to_latex <- function(df, file_path, caption = NULL) {
   
   # Build LaTeX table
   latex_table <- paste0(
-"\\begin{table}[t]
+    "\\begin{table}[t]
 \\centering
+\\caption{", caption_text, "}
+\\label{", label, "}
 \\fontsize{12pt}{14pt}\\selectfont
 \\begin{tabular}{@{\\extracolsep{\\fill}}", align_string, "}
 \\toprule
@@ -138,8 +140,6 @@ export_df_to_latex <- function(df, file_path, caption = NULL) {
 ", body_text, "
 \\bottomrule
 \\end{tabular}
-\\caption{", caption_text, "}
-\\label{", label, "}
 \\end{table}"
   )
   
