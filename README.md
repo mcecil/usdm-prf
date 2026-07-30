@@ -9,6 +9,7 @@ Rainfall Index insurance program against U.S. Drought Monitor (USDM) exceptional
 drought across nine western states (CA, NV, AZ, NM, CO, UT, TX, OK, KS), 2010–2025, and
 models how prior-year drought and basis-risk experience relate to subsequent enrollment.
 
+- **Repository:** https://github.com/mcecil/usdm-prf
 - **Paper DOI:** ⟨FILL: 10.xxxx/… once assigned⟩
 - **Archived release DOI:** ⟨FILL: Zenodo concept DOI, 10.5281/zenodo.xxxxxxx⟩
 - **Corresponding author:** Michael J. Cecil, University of Maryland (mjcecil@umd.edu)
@@ -17,6 +18,9 @@ models how prior-year drought and basis-risk experience relate to subsequent enr
 
 ## What this repository contains
 
+- **`0_1_download_cpc.R`** — downloads raw CPC daily precipitation via the `rnoaa`
+  package and writes one CSV per day to `data/cpc_downloads/`. This is the entry point
+  that produces the ~30 GB raw CPC record the rest of the pipeline consumes.
 - **`*.Rmd`** — the 14 analysis scripts (R Markdown), organized as a numbered pipeline.
 - **`_setup.R`** — shared setup sourced by the `2_2*` layer: library loads, conflict
   preferences, constants, the drought-event window definitions, and the LaTeX
@@ -24,7 +28,6 @@ models how prior-year drought and basis-risk experience relate to subsequent enr
 - **`data/`** — inputs and derived objects (see *Data* below for what is and isn't included).
 - **`outputs/`** (or `data/outputs/`) — generated tables (`.tex`), figures, and the
   regression/summary artifacts consumed by the manuscript.
-- **`⟨FILL: manuscript dir, if included⟩`** — LaTeX source for the manuscript, if archived here.
 
 ---
 
@@ -46,10 +49,22 @@ county-year enrollment panel) — plus the state/county boundary files under
 `data/boundaries/` (see *Reproducibility* below). These let a user reproduce all tables
 and figures without re-downloading and re-processing the ~30 GB CPC record.
 
-> **Note on the CPC data.** The raw CPC precipitation archive is large (~30 GB) and is
-> **not** included. `1_1_group_cpc_data.Rmd` expects it at a path set via the
-> `cpc_data_path` config variable near the top of that script — edit that to point at
-> your local copy before running the pipeline from raw inputs.
+> **Note on the CPC data.** The raw CPC precipitation record is large (~30 GB) and is
+> **not** included in this repository. It is downloaded by `0_1_download_cpc.R`, which
+> pulls daily CONUS precipitation through the `rnoaa` package (`cpc_prcp()`) and writes
+> one CSV per day to `data/cpc_downloads/`. `1_1_group_cpc_data.Rmd` then reads those
+> CSVs. To reproduce the analysis from raw inputs, run `0_1` first; to reproduce only the
+> tables and figures, use the derived `.rda` objects included here and skip `0_1`–`1_3`.
+>
+> Two things to set before running `0_1`:
+> - **Date range.** The script's `start_date`/`end_date` (top of the file) must span the
+>   full study period. The RI for a given contract year needs history back to 1948, so the
+>   historical-normal inputs must be present; set the range to cover every year your
+>   analysis uses, not just the most recent download window.
+> - **`rnoaa` availability.** `0_1` installs `rnoaa` from GitHub (`ropensci/rnoaa`)
+>   because the package was archived from CRAN. If the upstream CPC endpoint changes, the
+>   raw download step may need adjustment, but the derived `.rda` objects included here
+>   remain sufficient to reproduce all published results without re-downloading.
 
 ---
 
@@ -58,6 +73,7 @@ and figures without re-downloading and re-processing the ~30 GB CPC record.
 Scripts are numbered by dependency. **Run in this order:**
 
 ```
+0_1_download_cpc.R              # download raw CPC daily precip (one CSV/day) via rnoaa
 1_1_group_cpc_data.Rmd          # aggregate raw CPC daily precip to two-month intervals
 1_2_index_calculation.Rmd       # compute the Rainfall Index (RI) per grid-interval
 1_3_payout_calculations_no_sim.Rmd   # binary payout (RI <= 0.90) per grid-interval
@@ -88,7 +104,7 @@ Each `2_2*`/`2_5*` script begins with `source(here::here("_setup.R"))` followed 
 
 ## Requirements
 
-- **R** version ⟨FILL: e.g. 4.3.x — the version you ran⟩ or later.
+- **R** version 4.4.1 (the version used for this study) or later.
 - **Pandoc / RStudio** to knit the `.Rmd` files (RStudio bundles Pandoc).
 - A **LaTeX** installation if you knit to PDF (`tinytex::install_tinytex()` is sufficient).
 
@@ -106,8 +122,40 @@ install.packages(c(
 ))
 ```
 
-For exact reproducibility, package versions are pinned in `⟨FILL: renv.lock if you use
-renv — strongly recommended; otherwise list sessionInfo() output here⟩`.
+One additional package, **`rnoaa`**, is required only for the raw CPC download
+(`0_1_download_cpc.R`) and is **not on CRAN** — it is installed from GitHub:
+
+```r
+# install.packages("devtools")
+devtools::install_github("ropensci/rnoaa")
+```
+
+`rnoaa` is not needed to reproduce the tables and figures from the included derived data.
+
+### Package versions used
+
+The analysis was run under **R 4.4.1** with the following package versions:
+
+| Package | Version | | Package | Version |
+|---|---|---|---|---|
+| tidyverse | 2.0.0 | | ggplot2 | 4.0.0 |
+| dplyr | 1.2.0 | | ggpubr | 0.6.2 |
+| tidyr | 1.3.1 | | ggrepel | 0.9.6 |
+| stringr | 1.6.0 | | patchwork | 1.3.2 |
+| tibble | 3.3.0 | | scales | 1.4.0 |
+| purrr | 1.2.0 | | scico | 1.5.0 |
+| lubridate | 1.9.4 | | viridis | 0.6.5 |
+| sf | 1.0-22 | | gt | 1.3.0 |
+| raster | 3.6-32 | | here | 1.0.2 |
+| exactextractr | 0.10.0 | | conflicted | 1.2.0 |
+| tigris | 2.2.1 | | rlang | 1.1.7 |
+| fixest | 0.13.2 | | assertthat | 0.2.1 |
+| car | 3.1-3 | | tinytex | 0.58 |
+| rnoaa | GitHub: ropensci/rnoaa | | | |
+
+`rnoaa` is installed from GitHub (see above), not CRAN, so it has no CRAN version
+number; pin the commit via `renv` or `install_github(ref = ...)` for exact
+reproducibility.
 
 ---
 
@@ -160,8 +208,8 @@ A machine-readable `CITATION.cff` is included at the repository root.
 
 ## License
 
-- **Code:** ⟨FILL: MIT or BSD-3-Clause — see `LICENSE`⟩
-- **Derived data:** ⟨FILL: CC-BY-4.0⟩
+- **Code:** MIT (see `LICENSE`)
+- **Derived data:** CC-BY-4.0
 
 The upstream datasets are U.S. federal government products (public domain); see each
 source above for its own terms.
