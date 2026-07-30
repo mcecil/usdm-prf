@@ -954,9 +954,9 @@ format_combo <- function(df) {
 #====================================================
 # Build rows
 #====================================================
-row_all  <- summarise_wide(gw_all)  %>% mutate(Period = "2010\\textendash{}2025")
-row_2011 <- summarise_wide(gw_2011) %>% mutate(Period = "2011 (May\\textendash{}Dec)")
-row_2021 <- summarise_wide(gw_2021) %>% mutate(Period = "2020\\textendash{}2021 (Nov\\textendash{}Oct)")
+row_all  <- summarise_wide(gw_all)  %>% mutate(Period = "2010--2025")
+row_2011 <- summarise_wide(gw_2011) %>% mutate(Period = "2011 (May--Dec)")
+row_2021 <- summarise_wide(gw_2021) %>% mutate(Period = "2020--2021 (Nov--Oct)")
 
 table1_combo <- bind_rows(row_all, row_2011, row_2021) %>%
   format_combo()
@@ -989,6 +989,8 @@ export_combo_latex <- function(df, file_path, caption = NULL) {
   body <- paste0(
 "\\begin{table}[H]
 \\centering
+\\caption{", caption_txt, "}
+\\label{", label, "}
 \\small
 \\begin{tabular}{lrrrr}
 \\toprule
@@ -997,8 +999,6 @@ export_combo_latex <- function(df, file_path, caption = NULL) {
 ", body_text, "
 \\bottomrule
 \\end{tabular}
-\\caption{", caption_txt, "}
-\\label{", label, "}
 \\end{table}"
   )
 
@@ -1087,7 +1087,7 @@ export_rates_latex <- function(df, file_path, caption = NULL,
 # ── TABLE 1: By period ────────────────────────────────────────────────────────
 row_all  <- summarise_wide(gw_all)  %>% mutate(Period = "2010--2025")
 row_2011 <- summarise_wide(gw_2011) %>% mutate(Period = "2011 (May--Dec)")
-row_2021 <- summarise_wide(gw_2021) %>% mutate(Period = "2020--21 (Nov--Oct)")
+row_2021 <- summarise_wide(gw_2021) %>% mutate(Period = "2020--2021 (Nov--Oct)")
 
 bind_rows(row_all, row_2011, row_2021) %>%
   format_rates() %>%
