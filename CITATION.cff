@@ -1,0 +1,58 @@
+cff-version: 1.2.0
+message: "If you use this software or the derived data, please cite both the paper (preferred-citation) and this archived release."
+title: "Replication code and derived data for 'Rainfall Index Insurance Under Exceptional Drought: Payout Alignment and Producer Response'"
+abstract: >-
+  Replication code and derived data for a study benchmarking payouts from the
+  USDA Pasture, Rangeland, and Forage (PRF) Rainfall Index insurance program
+  against U.S. Drought Monitor exceptional (D4) drought across nine western
+  U.S. states, 2010-2025, and modeling how prior-year drought and basis-risk
+  experience relate to subsequent PRF enrollment.
+type: software
+version: 1.0.0
+# date-released: 2026-07-30   # <-- FILL when you cut the release
+# doi: 10.5281/zenodo.XXXXXXX  # <-- FILL with the Zenodo concept DOI after minting
+license: MIT
+repository-code: "https://github.com/mcecil/usdm-prf"  
+authors:
+  - family-names: Cecil
+    given-names: Michael J.
+    affiliation: "Department of Geographical Sciences, University of Maryland; NASA Harvest"
+    orcid: "https://orcid.org/0000-0003-2011-8607"   # <-- FILL
+  - family-names: Benami
+    given-names: Elinor
+    affiliation: "NASA Harvest; Department of Agricultural and Applied Economics, Virginia Tech"
+    orcid: "https://orcid.org/0000-0002-8586-1314"   # <-- FILL
+  - family-names: Carroll
+    given-names: Anne
+    affiliation: "Department of Agricultural and Applied Economics, Virginia Tech"
+    orcid: "https://orcid.org/0009-0007-3627-4168"   # <-- FILL
+  - family-names: Yu
+    given-names: Jisang
+    affiliation: "Department of Food and Resource Economics, Korea University"
+    orcid: "https://orcid.org/0000-0003-3936-1877"   # <-- FILL
+  - family-names: Ifft
+    given-names: Jennifer
+    affiliation: "Department of Agricultural Economics, Kansas State University"
+    orcid: "https://orcid.org/0000-0001-6592-8764"   # <-- FILL
+preferred-citation:
+  type: article
+  title: "Rainfall Index Insurance Under Exceptional Drought: Payout Alignment and Producer Response"
+  year: 2026
+  journal: "Earth's Future"
+  # doi: 10.xxxx/xxxxx           # <-- FILL with the article DOI once assigned
+  authors:
+    - family-names: Cecil
+      given-names: Michael J.
+      orcid: "https://orcid.org/0000-0003-2011-8607"   # <-- FILL
+    - family-names: Benami
+      given-names: Elinor
+      orcid: "https://orcid.org/0000-0002-8586-1314"   # <-- FILL
+    - family-names: Carroll
+      given-names: Anne
+      orcid: "https://orcid.org/0009-0007-3627-4168"   # <-- FILL
+    - family-names: Yu
+      given-names: Jisang
+      orcid: "https://orcid.org/0000-0003-3936-1877"   # <-- FILL
+    - family-names: Ifft
+      given-names: Jennifer
+      orcid: "https://orcid.org/0000-0001-6592-8764"   # <-- FILL

@@ -1066,6 +1066,8 @@ export_rates_latex <- function(df, file_path, caption = NULL,
   body <- paste0(
 "\\begin{table}[H]
 \\centering
+\\caption{", caption_txt, "}
+\\label{", label, "}
 \\small
 \\begin{tabular}{lrrrr}
 \\toprule
@@ -1074,8 +1076,6 @@ export_rates_latex <- function(df, file_path, caption = NULL,
 ", body_text, "
 \\bottomrule
 \\end{tabular}
-\\caption{", caption_txt, "}
-\\label{", label, "}
 \\end{table}"
   )
 
